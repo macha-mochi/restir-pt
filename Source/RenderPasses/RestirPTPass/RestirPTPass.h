@@ -74,9 +74,9 @@ private:
     /// Max number of indirect bounces (0 = none).
     uint mMaxBounces = 3;
     /// Compute direct illumination (otherwise indirect only).
-    bool mComputeDirect = true;
+    bool mComputeDirect = false;
     /// Use importance sampling for materials.
-    bool mUseImportanceSampling = true;
+    bool mUseImportanceSampling = false;
 
     // Runtime data
 

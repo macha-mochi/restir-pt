@@ -1,4 +1,4 @@
-#include "RestirTypes.slang" //TODO: check if the filepath works here (ie are we starting from Falcor root? or what idk)
+#include "RestirTypes.slang"
 
 //Inputs (will also modify reservoirs)
 RWStructuredBuffer<Reservoir> reservoirs;
@@ -17,7 +17,22 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     if (any(pixel >= dims)) return; // return if oob
 
     uint bufferInd = pixel.y * dims.x + pixel.x;
-    float3 color = reservoirs[bufferInd].radiance;
+    float3 color = reservoirs[bufferInd].p_hat_X;
+    /*if (dot(color, color) == 0) {
+        color = float3(1, 0, 0);
+    } else {
+        color = float3(0, 1, 0);
+    }*/
 
-    gOutputColor[pixel] = float4(color, 1.f);
+    gOutputColor[pixel] = float4(color * 10, 1.f);
 }
+/*void updateReservoir(Reservoir r, Sample sample, float3 radiance_new, float w_i_new, inout SampleGenerator sg) {
+    r.w_sum += w_i_new;
+    if (sampleNext1D(sg) < w_i_new / r.w_sum) {
+        // replace current sample with new one
+        r.X = sample;
+        r.radiance = radiance_new;
+        r.w_i = w_i_new;
+        r.M++;
+    }
+}*/

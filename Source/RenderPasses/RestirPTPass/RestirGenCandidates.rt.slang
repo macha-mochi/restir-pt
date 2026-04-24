@@ -45,7 +45,7 @@
 #include "Scene/SceneDefines.slangh"
 #include "Utils/Math/MathConstants.slangh"
 
-#include "RestirTypes.slang" //TODO: check if the filepath works here (ie are we starting from Falcor root? or what idk)
+#include "RestirTypes.slang"
 
 import Scene.Raytracing;
 import Scene.Intersection;
@@ -99,6 +99,12 @@ struct ScatterRayData
     float3 origin;    ///< Next path segment origin.
     float3 direction; ///< Next path segment direction.
 
+    // added for restir
+    float3 p_hat; // Value of f for this path aka the version that's not multiplied by the pdf. L_incoming * bsdf * geo term
+    float3 p_hat_thp;                   // Throughput for the p_hat calculations. doesn't include pdf
+    float pdf_a;                        ///< Current path pdf (just multiplying) in terms of area
+    float g;                    // geometry term for the path segment leading to this vertex
+
     SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
 
     /**
@@ -113,8 +119,21 @@ struct ScatterRayData
         this.origin = float3(0, 0, 0);
         this.direction = float3(0, 0, 0);
         this.sg = sg;
+
+        this.p_hat = float3(0, 0, 0);
+        this.p_hat_thp = float3(1, 1, 1);
+        this.pdf_a = 1.f;
+        this.g = 1.f;
     }
 };
+
+struct PathData //struct for holding info we need for restir
+{
+    float3 p_hat = float3(0, 0, 0); // Value of f for this path aka the version that's not multiplied by the pdf. L_incoming * bsdf * geo term
+    float3 p_hat_thp = float3(1, 1, 1); // Throughput for the p_hat calculations. doesn't include pdf
+    float pdf_a = 1.f;      ///< Current path pdf (just multiplying) in terms of area
+    float g = 1.f;          // geometry term for the path segment leading to this vertex
+}
 
 /**
  * Setup ShadingData based on loaded vertex/material attributes for a hit point.
@@ -297,6 +316,14 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         }
         rayData.direction = bsdfSample.wo;
         rayData.thp *= bsdfSample.weight;
+
+        // additional info needed for restir
+        // bsdfsample.weight = f * dot(wo, n) / pdf
+        // wo is normalized in world space
+        float3 f = bsdfSample.weight * bsdfSample.pdf;
+        rayData.p_hat_thp *= f; //geometry term will be multiplied on the next bounce
+        rayData.pdf_a *= bsdfSample.pdf; //pdf is in solid angle, converts to area upon a hit. TODO if this ray doesn't end up hitting anything then pdf might be wrong
+
         return any(rayData.thp > 0.f);
     }
 
@@ -326,6 +353,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     if (kUseEmissiveLights && (kComputeDirect || rayData.pathLength > 0))
     {
         rayData.radiance += rayData.thp * mi.getProperties(sd).emission;
+        rayData.p_hat += rayData.p_hat_thp * mi.getProperties(sd).emission; //update p_hat for restir
     }
 
     // Check whether to terminate based on max depth.
@@ -352,7 +380,14 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     {
         float3 Lr = evalDirectAnalytic(sd, mi, rayData.sg);
         rayData.radiance += rayData.thp * Lr;
+        rayData.p_hat += rayData.p_hat_thp * Lr; // TODO might not work correctly with analytic lights. fix when you turn this flag back on
     }
+
+    // Multiply pdf_a by pdf and geometry term for the path segment that led to this hit
+    float cos = abs(dot(-rayData.direction, sd.faceN)); // sd.faceN is face normal in world space on the front facing side. is probably unit?
+    float3 dist = sd.posW - rayData.origin;
+    rayData.g = cos / dot(dist, dist); //(hit point) - (origin of ray that hit this point)
+    rayData.pdf_a *= rayData.g; // convert pdf from solid angle to area for the segment that ends at this vertex
 
     // Generate scatter ray for the next path segment.
     // The raygen shader will continue the path based on the returned payload.
@@ -377,9 +412,9 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
  *
  * @param[in] pixel Pixel to trace a path for.
  * @param[in] frameDim Dimension of the frame in pixels.
- * @return Returns the estimated color (radiance).
+ * @param[in,out] pd Path data for restir. Added by me
  */
-float3 tracePath(const uint2 pixel, const uint2 frameDim)
+float3 tracePath(const uint2 pixel, const uint2 frameDim, inout PathData pd)
 {
     float3 outColor = float3(0.f);
 
@@ -447,11 +482,19 @@ float3 tracePath(const uint2 pixel, const uint2 frameDim)
 
         // Store contribution from scatter ray.
         outColor += rayData.radiance;
+
+        // populate fields of path data with our info from rayData
+        pd.p_hat = rayData.p_hat;
+        pd.p_hat_thp = rayData.p_hat_thp;
+        pd.pdf_a = rayData.pdf_a;
+        pd.g = rayData.g;
     }
     else
     {
         // Background pixel.
         outColor = kUseEnvBackground ? gScene.envMap.eval(primaryRayDir) : kDefaultBackgroundColor;
+
+        //TODO pd is not updated when we dont hit anything
     }
 
     return outColor;
@@ -606,11 +649,19 @@ void rayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 frameDim = DispatchRaysDimensions().xy;
 
-    float3 color = tracePath(pixel, frameDim);
+    PathData pd;
+    float3 color = tracePath(pixel, frameDim, pd);
 
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
-    float W = 1.f; // TODO calculate later with correct pdf and target pdf
-    float W_sum = 1.f;
-    reservoirs[bufferInd] = Reservoir(color, W, W_sum, 1); // TODO do we want to update values of an old reservoir or make a new one each time?
-    reservoirs[bufferInd].M = 1;
+    float W = 1.f / pd.pdf_a; // bc the pdf of this X_i is known
+    float luminance = dot(pd.p_hat, float3(0.2126, 0.7152, 0.0722));
+    float w = luminance * W; // w_i = m_i(X) * p_hat * Wx. but here m_i(X) = 1 because there's only 1 way we get this sample
+    Reservoir r;
+    // r.X = Sample.NULL;
+    r.p_hat_X = pd.p_hat;
+    r.W_X = W;
+    r.w_i = w;
+    r.w_sum = w;
+    r.M = 1;
+    reservoirs[bufferInd] = r;
 }
