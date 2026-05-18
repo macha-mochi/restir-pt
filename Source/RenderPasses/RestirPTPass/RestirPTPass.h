@@ -29,6 +29,7 @@
 #include "Falcor.h"
 #include "RenderGraph/RenderPass.h"
 #include "Utils/Sampling/SampleGenerator.h"
+#include "Rendering/Lights/EmissiveLightSampler.h"
 
 using namespace Falcor;
 
@@ -61,13 +62,15 @@ public:
 private:
     void parseProperties(const Properties& props);
     void prepareVars();
+    void resetLighting();
+    bool prepareLighting(RenderContext* pRenderContext);
 
     // Internal state
 
-    /// Current scene.
-    ref<Scene> mpScene;
-    /// GPU sample generator.
-    ref<SampleGenerator> mpSampleGenerator;
+    ref<Scene> mpScene; /// Current scene.
+    ref<SampleGenerator> mpSampleGenerator; /// GPU sample generator.
+    std::unique_ptr<EmissiveLightSampler> mpEmissiveSampler; ///< Emissive light sampler or nullptr if not used. 
+
 
     // Configuration
 

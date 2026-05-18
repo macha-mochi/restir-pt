@@ -17,22 +17,12 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     if (any(pixel >= dims)) return; // return if oob
 
     uint bufferInd = pixel.y * dims.x + pixel.x;
-    float3 color = reservoirs[bufferInd].p_hat_X;
-    /*if (dot(color, color) == 0) {
-        color = float3(1, 0, 0);
-    } else {
-        color = float3(0, 1, 0);
-    }*/
+    float3 f_X = reservoirs[bufferInd].p_hat_X;
+    float W_X = reservoirs[bufferInd].W_X;
 
-    gOutputColor[pixel] = float4(color * 10, 1.f);
+    //temporal
+
+    //spatial
+
+    gOutputColor[pixel] = float4(f_X * W_X, 1.f);
 }
-/*void updateReservoir(Reservoir r, Sample sample, float3 radiance_new, float w_i_new, inout SampleGenerator sg) {
-    r.w_sum += w_i_new;
-    if (sampleNext1D(sg) < w_i_new / r.w_sum) {
-        // replace current sample with new one
-        r.X = sample;
-        r.radiance = radiance_new;
-        r.w_i = w_i_new;
-        r.M++;
-    }
-}*/

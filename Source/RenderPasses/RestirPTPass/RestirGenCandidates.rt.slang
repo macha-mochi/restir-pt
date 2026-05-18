@@ -52,6 +52,9 @@ import Scene.Intersection;
 import Utils.Math.MathHelpers;
 import Utils.Geometry.GeometryHelpers;
 import Utils.Sampling.SampleGenerator;
+import Rendering.Lights.EnvMapSampler;
+import Rendering.Lights.EmissiveLightSampler;
+import Rendering.Lights.EmissiveLightSamplerHelpers;
 import Rendering.Lights.LightHelpers;
 
 cbuffer CB
@@ -79,6 +82,8 @@ static const bool kUseEnvBackground = USE_ENV_BACKGROUND;
 static const float3 kDefaultBackgroundColor = float3(0, 0, 0);
 static const float kRayTMax = FLT_MAX;
 
+EmissiveLightSampler emissiveSampler; ///< Emissive light sampler. Only valid when kUseEmissiveLights == true.
+
 /**
  * Payload for shadow ray.
  */
@@ -88,7 +93,7 @@ struct ShadowRayData
 };
 
 /**
- * Payload for scatter ray (up to 72B).
+ * Payload for scatter ray
  */
 struct ScatterRayData
 {
@@ -97,11 +102,16 @@ struct ScatterRayData
     float3 thp;       ///< Current path throughput. This is updated at each path vertex.
     uint pathLength;  ///< Path length in number of path segments (0 at origin, 1 at first secondary hit, etc.). Max 2^31.
     float3 origin;    ///< Next path segment origin.
+    float3 normal;    ///< Shading normal at origin. Used for light sampling and MIS weight calculations.
     float3 direction; ///< Next path segment direction.
 
     // added for restir
-    float3 p_hat; // Value of f for this path aka the version that's not multiplied by the pdf. L_incoming * bsdf * geo term
-    float3 p_hat_thp;                   // Throughput for the p_hat calculations. doesn't include pdf
+    Sample BSDFSample;
+    Sample NEESample;
+    Sample nextNEESample;
+    bool lightSampledUpper; ///< (true if) Last path vertex sampled lights using NEE (in upper hemisphere).
+    bool lightSampledLower; ///< (true if) Last path vertex sampled lights using NEE (in lower hemisphere).
+    float3 p_hat_thp;                   // Throughput for the p_hat calculations. doesn't include pdf, only bsdf * geo term
     float pdf_a;                        ///< Current path pdf (just multiplying) in terms of area
     float g;                    // geometry term for the path segment leading to this vertex
 
@@ -120,20 +130,17 @@ struct ScatterRayData
         this.direction = float3(0, 0, 0);
         this.sg = sg;
 
-        this.p_hat = float3(0, 0, 0);
+        this.BSDFSample = NULL;
+        this.NEESample = NULL;
+        this.nextNEESample = NULL;
         this.p_hat_thp = float3(1, 1, 1);
         this.pdf_a = 1.f;
         this.g = 1.f;
+        this.lightSampledUpper = false;
+        this.lightSampledLower = false;
+        this.normal = float3(0, 0, 0);
     }
 };
-
-struct PathData //struct for holding info we need for restir
-{
-    float3 p_hat = float3(0, 0, 0); // Value of f for this path aka the version that's not multiplied by the pdf. L_incoming * bsdf * geo term
-    float3 p_hat_thp = float3(1, 1, 1); // Throughput for the p_hat calculations. doesn't include pdf
-    float pdf_a = 1.f;      ///< Current path pdf (just multiplying) in terms of area
-    float g = 1.f;          // geometry term for the path segment leading to this vertex
-}
 
 /**
  * Setup ShadingData based on loaded vertex/material attributes for a hit point.
@@ -310,6 +317,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
     if (mi.sample(sd, rayData.sg, bsdfSample, kUseImportanceSampling))
     {
         rayData.origin = rayOrigin;
+        rayData.normal = sd.getOrientedFaceNormal();
         if (!isCurveHit && bsdfSample.isLobe(LobeType::Transmission))
         {
             rayData.origin = sd.computeRayOrigin(false);
@@ -349,12 +357,45 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     let lod = ExplicitLodTextureSampler(0.f);
     let mi = gScene.materials.getMaterialInstance(sd, lod);
 
+    // Multiply pdf_a by pdf and geometry term for the path segment that led to this hit
+    float cos = abs(dot(-rayData.direction, sd.faceN)); // sd.faceN is face normal in world space on the front facing side. is probably unit?
+    float3 dist = sd.posW - rayData.origin;
+    rayData.g = cos / dot(dist, dist); //(hit point) - (origin of ray that hit this point)
+    rayData.pdf_a *= rayData.g;        // convert pdf from solid angle to area for the segment that ends at this vertex
+
     // Add emitted light.
+    float mi = 1.f;
+    float bsdf_p_hat = 0.f;
     if (kUseEmissiveLights && (kComputeDirect || rayData.pathLength > 0))
     {
-        rayData.radiance += rayData.thp * mi.getProperties(sd).emission;
-        rayData.p_hat += rayData.p_hat_thp * mi.getProperties(sd).emission; //update p_hat for restir
+        float3 Le = mi.getProperties(sd).emission;
+        rayData.radiance += rayData.thp * Le;
+
+        bsdf_p_hat = rayData.p_hat_thp * Le;
+        if (any(Le > 0.f)) { // if emission was non zero, this is where you calculate mis weight for bsdf sampling
+            //START OF BLOCK COPIED FROM PATHTRACER
+            //assume that we hit an emissive triangle and this is not the primary hit
+
+            // Prepare hit point struct with data needed for emissive light PDF evaluation.
+            TriangleLightHit hit;
+            TriangleHit triangleHit = hit.getTriangleHit();
+            hit.triangleIndex = gScene.lightCollection.getTriangleIndex(triangleHit.instanceID, triangleHit.primitiveIndex);
+            hit.posW = sd.posW;
+            hit.normalW = sd.getOrientedFaceNormal();
+
+            // Evaluate PDF at the hit, had it been generated with light sampling.
+            bool upperHemisphere = rayData.lightSampledUpper && !rayData.lightSampledLower; // Emissive light samplers have an option to exclusively sample the upper hemisphere
+            float lightPdf = getEmissiveSelectionProbability() * emissiveSampler.evalPdf(rayData.origin, rayData.normal, upperHemisphere, hit);
+
+            // Compute MIS weight by combining this with BSDF sampling.
+            // Note we can assume path.pdf > 0.f since we shouldn't have got here otherwise.
+            misWeight = evalMIS(1, path.pdf, 1, lightPdf);
+            //END OF BLOCK COPIED FROM PATHTRACER
+        }
     }
+    // store bsdf sample data into rayData TODO might need to add some info when it comes time to do shift mappings.
+    rayData.BSDFSample.p_hat_X = bsdf_p_hat;
+    rayData.BSDFSample.w_i = mi * bsdf_p_hat / rayData.pdf_a;
 
     // Check whether to terminate based on max depth.
     if (rayData.pathLength >= kMaxBounces)
@@ -376,18 +417,17 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     }
 
     // Add contribution of direct light from analytic lights.
+    // This should be where you add NEE. but if we're processing kth hit rn, this NEE is for the (k+1)th vertex to be on a light.
+    rayData.lightSampledUpper = false;
+    rayData.lightSampledLower = false;
+    rayData.NEESample = rayData.nextNEESample;
+    rayData.nextNEESample = NULL;
     if (kUseAnalyticLights)
     {
         float3 Lr = evalDirectAnalytic(sd, mi, rayData.sg);
         rayData.radiance += rayData.thp * Lr;
         rayData.p_hat += rayData.p_hat_thp * Lr; // TODO might not work correctly with analytic lights. fix when you turn this flag back on
     }
-
-    // Multiply pdf_a by pdf and geometry term for the path segment that led to this hit
-    float cos = abs(dot(-rayData.direction, sd.faceN)); // sd.faceN is face normal in world space on the front facing side. is probably unit?
-    float3 dist = sd.posW - rayData.origin;
-    rayData.g = cos / dot(dist, dist); //(hit point) - (origin of ray that hit this point)
-    rayData.pdf_a *= rayData.g; // convert pdf from solid angle to area for the segment that ends at this vertex
 
     // Generate scatter ray for the next path segment.
     // The raygen shader will continue the path based on the returned payload.
@@ -414,8 +454,10 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
  * @param[in] frameDim Dimension of the frame in pixels.
  * @param[in,out] pd Path data for restir. Added by me
  */
-float3 tracePath(const uint2 pixel, const uint2 frameDim, inout PathData pd)
+Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 {
+    Reservoir r;
+
     float3 outColor = float3(0.f);
 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
@@ -473,31 +515,35 @@ float3 tracePath(const uint2 pixel, const uint2 frameDim, inout PathData pd)
             rayData.terminated = true;
 
         // Follow path into the scene and compute its total contribution.
+        // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene. so path length > 0 by now
         for (uint depth = 0; depth <= kMaxBounces && !rayData.terminated; depth++)
         {
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             traceScatterRay(rayData);
+
+            // NEXT THING TO DO:
+            // you should probably perform RIS, resampling between current sample, bsdf sample, and nee sample for path of this length
+            // updateReservoir(r, bsdf sample info)
+            // updateReservoir(r, nee sample info)
+
+            float W = 1.f / rayData.pdf_a; // bc the pdf of this X_i is known
+            //luminance() turns p_hat into a 1d float instead of a 3d vector
+            float w = luminance(r.sample.p_hat_X) * W; // w_i = m_i(X) * p_hat * Wx. but here m_i(X) = 1 because there's only 1 way we get this sample
         }
 
         // Store contribution from scatter ray.
         outColor += rayData.radiance;
-
-        // populate fields of path data with our info from rayData
-        pd.p_hat = rayData.p_hat;
-        pd.p_hat_thp = rayData.p_hat_thp;
-        pd.pdf_a = rayData.pdf_a;
-        pd.g = rayData.g;
     }
     else
     {
         // Background pixel.
         outColor = kUseEnvBackground ? gScene.envMap.eval(primaryRayDir) : kDefaultBackgroundColor;
 
-        //TODO pd is not updated when we dont hit anything
+        //TODO r is not updated when we dont hit anything
     }
 
-    return outColor;
+    return r;
 }
 
 //
@@ -649,19 +695,54 @@ void rayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 frameDim = DispatchRaysDimensions().xy;
 
-    PathData pd;
-    float3 color = tracePath(pixel, frameDim, pd);
+    Reservoir r = tracePath(pixel, frameDim);
 
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
-    float W = 1.f / pd.pdf_a; // bc the pdf of this X_i is known
-    float luminance = dot(pd.p_hat, float3(0.2126, 0.7152, 0.0722));
-    float w = luminance * W; // w_i = m_i(X) * p_hat * Wx. but here m_i(X) = 1 because there's only 1 way we get this sample
-    Reservoir r;
-    // r.X = Sample.NULL;
-    r.p_hat_X = pd.p_hat;
-    r.W_X = W;
-    r.w_i = w;
-    r.w_sum = w;
-    r.M = 1;
     reservoirs[bufferInd] = r;
+}
+
+// HELPER FUNCTIONS
+
+/** Return the probabilities for selecting different light types.
+    \param[out] p Probabilities.
+*/
+void getLightTypeSelectionProbabilities(out float p[3])
+{
+    // Set relative probabilities of the different sampling techniques.
+    // TODO: These should use estimated irradiance from each light type. Using equal probabilities for now.
+    p[0] = kUseEnvLight ? 1.f : 0.f;
+    p[1] = kUseEmissiveLights ? 1.f : 0.f;
+    p[2] = kUseAnalyticLights ? 1.f : 0.f;
+
+    // Normalize probabilities. Early out if zero.
+    float sum = p[0] + p[1] + p[2];
+    if (sum == 0.f) return;
+
+    float invSum = 1.f / sum;
+    p[0] *= invSum;
+    p[1] *= invSum;
+    p[2] *= invSum;
+}
+
+float getEnvMapSelectionProbability() { float p[3]; getLightTypeSelectionProbabilities(p); return p[0]; }
+float getEmissiveSelectionProbability() { float p[3]; getLightTypeSelectionProbabilities(p); return p[1]; }
+float getAnalyicSelectionProbability() { float p[3]; getLightTypeSelectionProbabilities(p); return p[2]; }
+
+float luminance(float3 vec) {
+    return dot(vec, float3(0.2126, 0.7152, 0.0722));
+}
+
+/** Calcs balance heuristic for mis
+        \param[in] n0 Number of samples taken from the first sampling strategy.
+        \param[in] p0 Pdf for the first sampling strategy.
+        \param[in] n1 Number of samples taken from the second sampling strategy.
+        \param[in] p1 Pdf for the second sampling strategy.
+        \return Weight for the contribution from the first strategy (p0).
+    */
+float evalMIS(float n0, float p0, float n1, float p1)
+{
+    // Balance heuristic
+    float q0 = n0 * p0;
+    float q1 = n1 * p1;
+    return q0 / (q0 + q1);
 }

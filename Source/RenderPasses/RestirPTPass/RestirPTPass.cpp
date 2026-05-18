@@ -28,6 +28,7 @@
 #include "RestirPTPass.h"
 #include "RenderGraph/RenderPassHelpers.h"
 #include "RenderGraph/RenderPassStandardFlags.h"
+#include "Rendering/Lights/EmissiveUniformSampler.h"
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
 {
@@ -138,11 +139,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         FALCOR_THROW("This render pass does not support scene changes that require shader recompilation.");
     }
 
-    // Request the light collection if emissive lights are enabled.
-    if (mpScene->getRenderSettings().useEmissiveLights)
-    {
-        mpScene->getLightCollection(pRenderContext);
-    }
+    bool lightingChanged = prepareLighting(pRenderContext);
 
     // Configure depth-of-field.
     const bool useDOF = mpScene->getCamera()->getApertureRadius() > 0.f;
@@ -176,6 +173,12 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     auto var = mTracer.pVars->getRootVar();
     var["CB"]["gFrameCount"] = mFrameCount;
     var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
+
+    if (mpEmissiveSampler)
+    {
+        // TODO: Do we have to bind this every frame?
+        mpEmissiveSampler->bindShaderData(var["emissiveSampler"]);
+    }
 
     // Bind I/O buffers. These needs to be done per-frame as the buffers may change anytime.
     auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
@@ -258,6 +261,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mTracer.pBindingTable = nullptr;
     mTracer.pVars = nullptr;
     mFrameCount = 0;
+    resetLighting();
 
     //Set the scene to the new one
     mpScene = pScene;
@@ -340,6 +344,16 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         mpSpatiotemporalResamplingPass = createComputePass(kResampleComputeShaderFile, "spatiotemporalResampling");
     }
 }
+void RestirPTPass::resetLighting()
+{
+    // Retain the options for the emissive sampler. TODO: uncomment later when you add options for light bvh sampler
+    /* if (auto lightBVHSampler = dynamic_cast<LightBVHSampler*>(mpEmissiveSampler.get()))
+    {
+        mLightBVHOptions = lightBVHSampler->getOptions();
+    }*/
+
+    mpEmissiveSampler = nullptr;
+}
 
 void RestirPTPass::prepareVars()
 {
@@ -357,4 +371,107 @@ void RestirPTPass::prepareVars()
     // Bind utility classes into shared data.
     auto var = mTracer.pVars->getRootVar();
     mpSampleGenerator->bindShaderData(var);
+}
+
+bool RestirPTPass::prepareLighting(RenderContext* pRenderContext)
+{
+    bool lightingChanged = false;
+
+    /* if (is_set(mUpdateFlags, IScene::UpdateFlags::RenderSettingsChanged))
+    {
+        lightingChanged = true;
+        mRecompile = true;
+    }
+
+    if (is_set(mUpdateFlags, IScene::UpdateFlags::SDFGridConfigChanged))
+    {
+        mRecompile = true;
+    }
+
+    if (is_set(mUpdateFlags, IScene::UpdateFlags::EnvMapChanged))
+    {
+        mpEnvMapSampler = nullptr;
+        lightingChanged = true;
+        mRecompile = true;
+    }
+
+    if (mpScene->useEnvLight())
+    {
+        if (!mpEnvMapSampler)
+        {
+            mpEnvMapSampler = std::make_unique<EnvMapSampler>(mpDevice, mpScene->getEnvMap());
+            lightingChanged = true;
+            mRecompile = true;
+        }
+    }
+    else
+    {
+        if (mpEnvMapSampler)
+        {
+            mpEnvMapSampler = nullptr;
+            lightingChanged = true;
+            mRecompile = true;
+        }
+    }*/ //commented out bc we dont use env map sampler here
+
+    // Request the light collection if emissive lights are enabled.
+    if (mpScene->getRenderSettings().useEmissiveLights)
+    {
+        mpScene->getILightCollection(pRenderContext);
+    }
+
+    if (mpScene->useEmissiveLights())
+    {
+        if (!mpEmissiveSampler)
+        {
+            const auto& pLights = mpScene->getILightCollection(pRenderContext);
+            FALCOR_ASSERT(pLights && pLights->getActiveLightCount(pRenderContext) > 0);
+            FALCOR_ASSERT(!mpEmissiveSampler);
+
+            /* switch (mStaticParams.emissiveSampler)
+            {
+            case EmissiveLightSamplerType::Uniform:
+                mpEmissiveSampler = std::make_unique<EmissiveUniformSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext));
+                break;
+            case EmissiveLightSamplerType::LightBVH:
+                mpEmissiveSampler =
+                    std::make_unique<LightBVHSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext), mLightBVHOptions);
+                break;
+            case EmissiveLightSamplerType::Power:
+                mpEmissiveSampler = std::make_unique<EmissivePowerSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext));
+                break;
+            default:
+                FALCOR_THROW("Unknown emissive light sampler type");
+            } */ //commented out bc we only have one type of emissive sampler for now, uniform (TODO can change later)
+            mpEmissiveSampler = std::make_unique<EmissiveUniformSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext));
+                
+            /* lightingChanged = true;
+            mRecompile = true;*/
+        }
+    }
+    else
+    {
+        if (mpEmissiveSampler)
+        {
+            // Retain the options for the emissive sampler.
+            /* if (auto lightBVHSampler = dynamic_cast<LightBVHSampler*>(mpEmissiveSampler.get()))
+            {
+                mLightBVHOptions = lightBVHSampler->getOptions();
+            }*/
+
+            mpEmissiveSampler = nullptr;
+            /* lightingChanged = true;
+            mRecompile = true;*/
+        }
+    }
+
+    if (mpEmissiveSampler)
+    {
+        lightingChanged |= mpEmissiveSampler->update(pRenderContext, mpScene->getILightCollection(pRenderContext));
+        /* auto defines = mpEmissiveSampler->getDefines();
+        if (mpTracePass && mpTracePass->pProgram->addDefines(defines))
+            mRecompile = true; */ //commented out bc we dont use trace pass
+    }
+
+    return lightingChanged;
 }
