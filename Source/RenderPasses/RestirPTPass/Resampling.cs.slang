@@ -17,7 +17,7 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     if (any(pixel >= dims)) return; // return if oob
 
     uint bufferInd = pixel.y * dims.x + pixel.x;
-    float3 f_X = reservoirs[bufferInd].p_hat_X;
+    float3 f_X = reservoirs[bufferInd].X.p_hat_X;
     float W_X = reservoirs[bufferInd].W_X;
 
     //temporal
