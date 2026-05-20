@@ -43,7 +43,7 @@ const char kResampleComputeShaderFile[] = "RenderPasses/RestirPTPass/Resampling.
 //CANDIDATE GENERATION SETTINGS
 // Ray tracing settings that affect the traversal stack size.
 // These should be set as small as possible.
-const uint32_t kMaxPayloadSizeBytes = 128u;
+const uint32_t kMaxPayloadSizeBytes = 256u;
 const uint32_t kMaxRecursionDepth = 2u;
 
 const char kInputViewDir[] = "viewW";
@@ -157,6 +157,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mTracer.pProgram->addDefine("USE_EMISSIVE_LIGHTS", mpScene->useEmissiveLights() ? "1" : "0");
     mTracer.pProgram->addDefine("USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0");
     mTracer.pProgram->addDefine("USE_ENV_BACKGROUND", mpScene->useEnvBackground() ? "1" : "0");
+    mTracer.pProgram->addDefines(mpSampleGenerator->getDefines());
 
     // For optional I/O resources, set 'is_valid_<name>' defines to inform the program of which ones it can access.
     // TODO: This should be moved to a more general mechanism using Slang.
@@ -206,11 +207,9 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     // Spawn the rays.
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
 
-
     //COMPUTE PASS STUFF BELOW
     //Add defines, prepare vars, set constants, and bind i/o buffers
-    auto program = mpSpatiotemporalResamplingPass->getProgram();
-    program->addDefines(getValidResourceDefines(kOutputChannels, renderData));
+    //don't add new defines here bc the compute pass is already set after you created it when you set the scene
 
     var = mpSpatiotemporalResamplingPass->getRootVar();
     var["reservoirs"] = mpReservoirBuffer;
@@ -332,6 +331,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
             DefineList defines;
             mpScene->getShaderDefines(defines);
             // defines.add("RTXDI_INSTALLED", "1");
+            defines.add(mpSampleGenerator->getDefines());
 
             ProgramDesc desc;
             mpScene->getShaderModules(desc.shaderModules);

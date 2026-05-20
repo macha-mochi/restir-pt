@@ -4,7 +4,7 @@ import Utils.Geometry.GeometryHelpers;
 struct Reservoir
 {
     // info needed for reservoir: the sample X, its weight W, the sum of weights W_sum, and the sample count M (capped)
-    Sample X = Sample.NULL; // the current sample
+    Sample X = { { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f }, 0.f }; // the current sample
 
     float W_X = 0;                              // unbiased contribution weight of sample X
     float w_sum = 0; //sum of all lowercase w seen so far, for use in resampling
@@ -12,14 +12,21 @@ struct Reservoir
     uint c = 0; //cap at 20
 };
 struct Sample {
-    static Sample NULL = { float3(0.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, 0.0f), 0 };
-
     float3 x0; // first vertex
     float3 p_hat_X; // aka f, the realized contribution of this sample (no pdfs multiplied yet)
     float w_i;    // w_i = (resampling MIS weight m_i) * (target function evaluated for X_i) / (pdf of sampling X_i), where reciprocal of pdf of X_i is just W_Xi
+
+    static Sample createNull() {
+        Sample s;
+        s.x0 = { 0.f, 0.f, 0.f };
+        s.p_hat_X = { 0.f, 0.f, 0.f };
+        s.w_i = 0.f;
+        return s;
+    }
 }
-bool operator ==(const Sample s) {
-    return p_hat_X == s.p_hat_X && w_i == s.w_i;
+bool operator ==(const Sample s1, const Sample s2) {
+    vector<bool, 3> b = s1.p_hat_X == s2.p_hat_X;
+    return b[0] && b[1] && b[2] && s1.w_i == s2.w_i;
 }
 float luminance(float3 vec) {
     return dot(vec, float3(0.2126, 0.7152, 0.0722));
@@ -27,15 +34,14 @@ float luminance(float3 vec) {
 void updateReservoir(Reservoir r, Sample sample, float w_i_new, uint c_i, SampleGenerator sg) {
     r.w_sum += w_i_new;
     r.c += c_i;
+    if (w_i_new == 0) { //no chance to be chosen
+        return;
+    }
     if (sampleNext1D(sg) < w_i_new / r.w_sum) {
         // replace current sample with new one, if non null
         r.X = sample;
-        if (!(sample == Sample.NULL)) {
-            r.W_X = r.w_sum / luminance(sample.p_hat_X);
-        } else {
-            r.W_X = 0;
-        }
-        r.M++;
+        r.W_X = r.w_sum / luminance(sample.p_hat_X); //if we got to this point, w_i_new is non zero meaning mi, p_hat, and W_X were all nonzero. so not a null sample
+        r.M++; //TODO check what M represents again? why r we incrementing it
     }
 }
 /** Types of samplable lights.
