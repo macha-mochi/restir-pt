@@ -10,6 +10,8 @@ struct Reservoir
     float w_sum = 0; //sum of all lowercase w seen so far, for use in resampling
     uint M = 1;
     uint c = 0; //cap at 20
+
+    float3 direct_illumination; //DI at this pixel, to be added to f_X * W_X at the end
 };
 struct Sample {
     float3 x0; // first vertex

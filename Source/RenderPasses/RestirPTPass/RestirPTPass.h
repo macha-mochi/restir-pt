@@ -96,7 +96,9 @@ private:
     } mTracer;
 
     //Resources
+    ref<Buffer> mpDebugSpareBuffer; ///< Spare buffer for debugging purposes. TODO: remove later, or convert into ping pong
     ref<Buffer> mpReservoirBuffer; ///< Buffer storing path reservoirs TODO: probably need a second one to ping pong
+    ref<Buffer> mpDIBuffer; ///< Buffer storing direct illumination samples for each pixel
 
     //Compute passes
     //do you need one for testing candidate visibility??

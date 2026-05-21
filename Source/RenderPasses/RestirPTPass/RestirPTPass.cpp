@@ -203,6 +203,18 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpReservoirBuffer->setName("ReservoirBuffer");
         var["reservoirs"] = mpReservoirBuffer;
     }
+    if (!mpDebugSpareBuffer || mpDebugSpareBuffer->getElementCount() < elementCount)
+    {
+        mpDebugSpareBuffer = mpDevice->createStructuredBuffer(var["debugSpareBuffer"], elementCount);
+        mpDebugSpareBuffer->setName("DebugSpareBuffer");
+        var["debugSpareBuffer"] = mpDebugSpareBuffer;
+    }
+    if (!mpDIBuffer || mpDIBuffer->getElementCount() < elementCount)
+    {
+        mpDIBuffer = mpDevice->createStructuredBuffer(var["diBuffer"], elementCount);
+        mpDIBuffer->setName("DIBuffer");
+        var["diBuffer"] = mpDIBuffer;
+    }
 
     // Spawn the rays.
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
@@ -213,6 +225,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
 
     var = mpSpatiotemporalResamplingPass->getRootVar();
     var["reservoirs"] = mpReservoirBuffer;
+    var["diBuffer"] = mpDIBuffer;
     //Bind outputs to the compute pass
     for (auto channel : kOutputChannels)
         bind(var, channel);

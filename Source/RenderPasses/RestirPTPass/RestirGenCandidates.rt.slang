@@ -70,6 +70,8 @@ Texture2D<float4> gViewW; // Optional
 
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> reservoirs;
+RWStructuredBuffer<DebugData> debugSpareBuffer;
+RWStructuredBuffer<float3> diBuffer;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
@@ -90,6 +92,20 @@ struct ShadowRayData
 {
     bool visible;
 };
+
+struct DebugData {
+    uint path_length;
+    float3 thp = { 1.f, 1.f, 1.f };             // normal throughput as found by the ray, including the divide by pdf
+    float3 Le; //emission, if any, at this vertex
+    float3 bsdf_expected; //thp * Le
+
+    float3 bsdf_sampled; // the actual bsdf sample we got for this vertex, p_hat * W_X (from reservoir)
+    float3 p_hat_thp = { 1.f, 1.f, 1.f }; //the throughput we found for the phat without the divide by pdf
+    float3 bsdf_p_hat; //the bsdf p_hat we found for this sample
+    float misWeight;
+    float lumi_bsdf_p_hat;   // luminance of bsdf p hat
+    float path_pdf_area = 1; //pdf of path in area
+}
 
 /**
  * Payload for scatter ray
@@ -116,6 +132,10 @@ struct ScatterRayData
     float g;                    // geometry term for the path segment leading to this vertex
 
     SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
+
+    //attributes for debugging
+    float3 Le; //emission at this vertex
+    float misW; //mis weight that this bsdf sample used
 
     /**
      * Initializes ray payload with default parameters.
@@ -569,9 +589,11 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     float cos = abs(dot(-rayData.direction, sd.faceN)); // sd.faceN is face normal in world space on the front facing side. is probably unit?
     float3 dist = sd.posW - rayData.origin;
     rayData.g = cos / dot(dist, dist); //(hit point) - (origin of ray that hit this point)
+    rayData.p_hat_thp *= rayData.g;
     rayData.path_pdf_area *= rayData.g;        // convert pdf from solid angle to area for the segment that ends at this vertex
 
     // Add emitted light.
+    rayData.Le = float3(0.f, 0.f, 0.f);
     float misWeight = 1.f;
     float3 bsdf_p_hat = float3(0.f, 0.f, 0.f);
     if (kUseEmissiveLights && (kComputeDirect || rayData.pathLength > 0))
@@ -580,6 +602,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayData.radiance += rayData.thp * Le;
 
         bsdf_p_hat = rayData.p_hat_thp * Le;
+        rayData.Le = Le;
         if (any(Le > 0.f)) { // if emission was non zero, this is where you calculate mis weight for bsdf sampling
             //assume that we hit an emissive triangle and this is not the primary hit
 
@@ -601,6 +624,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     }
     // store bsdf sample data into rayData TODO might need to add some info when it comes time to do shift mappings.
     rayData.BSDFSample.p_hat_X = bsdf_p_hat;
+    rayData.misW = misWeight;
     rayData.BSDFSample.w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf_area;
 
     // Check whether to terminate based on max depth.
@@ -703,12 +727,12 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
  *
  * @param[in] pixel Pixel to trace a path for.
  * @param[in] frameDim Dimension of the frame in pixels.
- * @param[in,out] pd Path data for restir. Added by me
  */
 Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 {
+    uint bufferInd = pixel.y * frameDim.x + pixel.x;
     Reservoir r;
-
+    DebugData d;
     float3 outColor = float3(0.f);
 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
@@ -748,15 +772,22 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             rayOrigin = sd.computeRayOrigin();
         }
 
-        if (kComputeDirect)
+        float3 direct_illum = { 0.f, 0.f, 0.f };
+        if (kComputeDirect) //this code adds direct lighting, that is, emission from anything that the primary camera ray hit. TODO this is why ur version doesn't have DI!'
         {
             // Always output directly emitted light, independent of whether emissive materials are treated as light sources or not.
-            outColor += mi.getProperties(sd).emission;
+            float3 temp = mi.getProperties(sd).emission;
+            outColor += temp;
+            direct_illum += temp;
 
             // Add contribution of direct light from analytic lights.
             // Light probe and mesh lights are handled by the scatter ray hit/miss shaders.
-            outColor += kUseAnalyticLights ? evalDirectAnalytic(sd, mi, sg) : float3(0.f);
+            temp = kUseAnalyticLights ? evalDirectAnalytic(sd, mi, sg) : float3(0.f);
+            outColor += temp;
+            direct_illum += temp;
         }
+        diBuffer[bufferInd] = direct_illum; // add DI after you calculated W_X, the estimate of 1/pdf, using just the f of the actual integral
+        // since its Le + (integral)f
 
         // Prepare ray payload.
         ScatterRayData rayData = ScatterRayData(sg);
@@ -786,6 +817,18 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 r.W_X = r.X.w_i / luminance(r.X.p_hat_X);
             }
 
+            d.path_length = rayData.pathLength;
+            d.thp = rayData.thp;
+            d.Le = rayData.Le;
+            d.bsdf_expected = d.thp * d.Le;
+            d.p_hat_thp = rayData.p_hat_thp;
+            d.bsdf_p_hat = rayData.BSDFSample.p_hat_X;
+            d.misWeight = rayData.misW;
+            d.lumi_bsdf_p_hat = luminance(d.bsdf_p_hat);
+            d.path_pdf_area = rayData.path_pdf_area;
+            d.bsdf_sampled = d.bsdf_p_hat * r.W_X;
+
+            debugSpareBuffer[bufferInd] = d;
         }
 
         // Store contribution from scatter ray.
