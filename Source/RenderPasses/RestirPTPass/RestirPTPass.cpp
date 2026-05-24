@@ -158,6 +158,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mTracer.pProgram->addDefine("USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0");
     mTracer.pProgram->addDefine("USE_ENV_BACKGROUND", mpScene->useEnvBackground() ? "1" : "0");
     mTracer.pProgram->addDefines(mpSampleGenerator->getDefines());
+    mTracer.pProgram->addDefines(mpEmissiveSampler->getDefines());
 
     // For optional I/O resources, set 'is_valid_<name>' defines to inform the program of which ones it can access.
     // TODO: This should be moved to a more general mechanism using Slang.
@@ -179,6 +180,11 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     {
         // TODO: Do we have to bind this every frame?
         mpEmissiveSampler->bindShaderData(var["emissiveSampler"]);
+    }
+    if (mpEnvMapSampler)
+    {
+        // TODO: Do we have to bind this every frame?
+        mpEnvMapSampler->bindShaderData(var["envMapSampler"]);
     }
 
     // Bind I/O buffers. These needs to be done per-frame as the buffers may change anytime.
@@ -209,11 +215,11 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpDebugSpareBuffer->setName("DebugSpareBuffer");
         var["debugSpareBuffer"] = mpDebugSpareBuffer;
     }
-    if (!mpDIBuffer || mpDIBuffer->getElementCount() < elementCount)
+    if (!mpDiBgBuffer || mpDiBgBuffer->getElementCount() < elementCount)
     {
-        mpDIBuffer = mpDevice->createStructuredBuffer(var["diBuffer"], elementCount);
-        mpDIBuffer->setName("DIBuffer");
-        var["diBuffer"] = mpDIBuffer;
+        mpDiBgBuffer = mpDevice->createStructuredBuffer(var["di_bgBuffer"], elementCount);
+        mpDiBgBuffer->setName("DI_BG_Buffer");
+        var["di_bgBuffer"] = mpDiBgBuffer;
     }
 
     // Spawn the rays.
@@ -225,7 +231,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
 
     var = mpSpatiotemporalResamplingPass->getRootVar();
     var["reservoirs"] = mpReservoirBuffer;
-    var["diBuffer"] = mpDIBuffer;
+    var["di_bgBuffer"] = mpDiBgBuffer;
     //Bind outputs to the compute pass
     for (auto channel : kOutputChannels)
         bind(var, channel);
@@ -366,6 +372,7 @@ void RestirPTPass::resetLighting()
     }*/
 
     mpEmissiveSampler = nullptr;
+    mpEnvMapSampler = nullptr;
 }
 
 void RestirPTPass::prepareVars()
@@ -406,7 +413,7 @@ bool RestirPTPass::prepareLighting(RenderContext* pRenderContext)
         mpEnvMapSampler = nullptr;
         lightingChanged = true;
         mRecompile = true;
-    }
+    }*/
 
     if (mpScene->useEnvLight())
     {
@@ -414,7 +421,6 @@ bool RestirPTPass::prepareLighting(RenderContext* pRenderContext)
         {
             mpEnvMapSampler = std::make_unique<EnvMapSampler>(mpDevice, mpScene->getEnvMap());
             lightingChanged = true;
-            mRecompile = true;
         }
     }
     else
@@ -423,9 +429,8 @@ bool RestirPTPass::prepareLighting(RenderContext* pRenderContext)
         {
             mpEnvMapSampler = nullptr;
             lightingChanged = true;
-            mRecompile = true;
         }
-    }*/ //commented out bc we dont use env map sampler here
+    }
 
     // Request the light collection if emissive lights are enabled.
     if (mpScene->getRenderSettings().useEmissiveLights)
@@ -458,8 +463,8 @@ bool RestirPTPass::prepareLighting(RenderContext* pRenderContext)
             } */ //commented out bc we only have one type of emissive sampler for now, uniform (TODO can change later)
             mpEmissiveSampler = std::make_unique<EmissiveUniformSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext));
                 
-            /* lightingChanged = true;
-            mRecompile = true;*/
+            lightingChanged = true;
+            //mRecompile = true;
         }
     }
     else
@@ -473,8 +478,8 @@ bool RestirPTPass::prepareLighting(RenderContext* pRenderContext)
             }*/
 
             mpEmissiveSampler = nullptr;
-            /* lightingChanged = true;
-            mRecompile = true;*/
+            lightingChanged = true;
+            //mRecompile = true;
         }
     }
 

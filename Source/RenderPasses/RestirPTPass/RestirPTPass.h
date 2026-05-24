@@ -29,6 +29,7 @@
 #include "Falcor.h"
 #include "RenderGraph/RenderPass.h"
 #include "Utils/Sampling/SampleGenerator.h"
+#include "Rendering/Lights/EnvMapSampler.h"
 #include "Rendering/Lights/EmissiveLightSampler.h"
 
 using namespace Falcor;
@@ -69,8 +70,8 @@ private:
 
     ref<Scene> mpScene; /// Current scene.
     ref<SampleGenerator> mpSampleGenerator; /// GPU sample generator.
-    std::unique_ptr<EmissiveLightSampler> mpEmissiveSampler; ///< Emissive light sampler or nullptr if not used. 
-
+    std::unique_ptr<EnvMapSampler> mpEnvMapSampler;          ///< Environment map sampler or nullptr if not used.
+    std::unique_ptr<EmissiveLightSampler> mpEmissiveSampler; ///< Emissive light sampler or nullptr if not used.
 
     // Configuration
 
@@ -98,7 +99,7 @@ private:
     //Resources
     ref<Buffer> mpDebugSpareBuffer; ///< Spare buffer for debugging purposes. TODO: remove later, or convert into ping pong
     ref<Buffer> mpReservoirBuffer; ///< Buffer storing path reservoirs TODO: probably need a second one to ping pong
-    ref<Buffer> mpDIBuffer; ///< Buffer storing direct illumination samples for each pixel
+    ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
 
     //Compute passes
     //do you need one for testing candidate visibility??

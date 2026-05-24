@@ -62,6 +62,7 @@ cbuffer CB
     uint gPRNGDimension; // First available PRNG dimension.
 }
 
+ParameterBlock<EnvMapSampler> envMapSampler; ///< Environment map sampler. Only valid when kUseEnvLight == true.
 ParameterBlock<EmissiveLightSampler> emissiveSampler; ///< Emissive light sampler. Only valid when kUseEmissiveLights == true.
 
 // Inputs
@@ -71,7 +72,7 @@ Texture2D<float4> gViewW; // Optional
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> reservoirs;
 RWStructuredBuffer<DebugData> debugSpareBuffer;
-RWStructuredBuffer<float3> diBuffer;
+RWStructuredBuffer<float3> di_bgBuffer;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
@@ -95,7 +96,14 @@ struct ShadowRayData
 
 struct DebugData {
     uint path_length;
-    float3 thp = { 1.f, 1.f, 1.f };             // normal throughput as found by the ray, including the divide by pdf
+
+    float3 Li; // incoming radiance at nee vertex
+    float li_pdf;
+    uint lightType; //type of nee sampled light
+    float3 nee_p_hat; // p hat for nee sample
+    float W_X;
+
+    /*float3 thp = { 1.f, 1.f, 1.f };             // normal throughput as found by the ray, including the divide by pdf
     float3 Le; //emission, if any, at this vertex
     float3 bsdf_expected; //thp * Le
 
@@ -104,7 +112,7 @@ struct DebugData {
     float3 bsdf_p_hat; //the bsdf p_hat we found for this sample
     float misWeight;
     float lumi_bsdf_p_hat;   // luminance of bsdf p hat
-    float path_pdf_area = 1; //pdf of path in area
+    float path_pdf_area = 1; //pdf of path in area*/
 }
 
 /**
@@ -133,9 +141,7 @@ struct ScatterRayData
 
     SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
 
-    //attributes for debugging
-    float3 Le; //emission at this vertex
-    float misW; //mis weight that this bsdf sample used
+    DebugData d;
 
     /**
      * Initializes ray payload with default parameters.
@@ -159,6 +165,8 @@ struct ScatterRayData
         this.lightSampledUpper = false;
         this.lightSampledLower = false;
         this.normal = float3(0, 0, 0);
+
+        this.d = {};
     }
 };
 
@@ -367,7 +375,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
     \param[out] ls Struct describing valid samples.
     \return True if the sample is valid and has nonzero contribution, false otherwise.
 */
-/*bool generateEnvMapSample(const PathVertex vertex, inout SampleGenerator sg, out LightSample ls)
+bool generateEnvMapSample(const PathVertex vertex, inout SampleGenerator sg, out LightSample ls)
 {
     ls = {}; // Default initialization to avoid divergence at returns.
 
@@ -383,9 +391,10 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
     ls.origin = vertex.getRayOrigin(lightSample.dir);
     ls.distance = kRayTMax;
     ls.dir = lightSample.dir;
+    ls.g = 1.f; //since env map stays in solid angle
 
     return any(ls.Li > 0.f);
-}*/
+}
 
 /** Generates a light sample on the emissive geometry.
     \param[in] vertex Path vertex.
@@ -394,13 +403,16 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
     \param[out] ls Struct describing valid samples.
     \return True if the sample is valid and has nonzero contribution, false otherwise.
 */
-bool generateEmissiveSample(const PathVertex vertex, const bool upperHemisphere, inout SampleGenerator sg, out LightSample ls)
+bool generateEmissiveSample(const PathVertex vertex, const bool upperHemisphere, inout SampleGenerator sg, out LightSample ls, inout DebugData d)
 {
     ls = {}; // Default initialization to avoid divergence at returns.
     if (!kUseEmissiveLights) return false;
 
     TriangleLightSample tls;
-    if (!emissiveSampler.sampleLight(vertex.pos, vertex.getOrientedFaceNormal(), upperHemisphere, sg, tls)) return false;
+    if (!emissiveSampler.sampleLight(vertex.pos, vertex.getOrientedFaceNormal(), upperHemisphere, sg, tls))
+    {
+        return false;
+    }
 
     // Setup returned sample.
     ls.Li = tls.pdf > 0.f ? tls.Le / tls.pdf : float3(0);
@@ -411,6 +423,9 @@ bool generateEmissiveSample(const PathVertex vertex, const bool upperHemisphere,
     float3 toLight = lightPos - ls.origin;
     ls.distance = length(toLight);
     ls.dir = normalize(toLight);
+
+    //Calculate geometry term. info needed: cos at light and distance to light which we have
+    ls.g = abs(dot(tls.normalW, -ls.dir)) / (ls.distance * ls.distance);
 
     return any(ls.Li > 0.f);
 }
@@ -437,7 +452,7 @@ bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator 
     if (!sampleLight(vertex.pos, gScene.getLight(lightIndex), sg, lightSample)) return false;
 
     // Setup returned sample.
-    ls.pdf = lightSample.pdf / lightCount;
+    ls.pdf = (lightSample.pdf == 0 ? 1.f : lightSample.pdf) / lightCount; // handle the Point and Directional pdfs being 0
     ls.Li = lightSample.Li * lightCount;
     // Offset shading position to avoid self-intersection.
     ls.origin = vertex.getRayOrigin(lightSample.dir);
@@ -445,6 +460,8 @@ bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator 
     // Do not worry about adjusting the ray length to avoid self-intersections at the light.
     ls.distance = lightSample.distance;
     ls.dir = lightSample.dir;
+    ls.g = ls.distance == kMaxLightDistance ? 1.f : (abs(dot(-ls.dir, lightSample.normalW)) / (ls.distance * ls.distance));
+    //if dist squared is infinity you cant convert to area
 
     return any(ls.Li > 0.f);
 }
@@ -514,21 +531,25 @@ bool selectLightType(out uint lightType, out float pdf, inout SampleGenerator sg
        \param[out] ls Struct describing valid samples.
        \return True if the sample is valid and has nonzero contribution, false otherwise.
    */
-bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphere, const bool sampleLowerHemisphere, inout SampleGenerator sg, out LightSample ls)
+bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphere, const bool sampleLowerHemisphere, inout SampleGenerator sg,
+                                inout DebugData d, out LightSample ls)
 {
     ls = {};
 
-    uint lightType = (uint)LightType::Analytic; // ONLY DO ANALYTIC FOR NOW, TODO add other types
-    float selectionPdf = getAnalyicSelectionProbability();
-    //if (!selectLightType(lightType, selectionPdf, sg)) return false;
+    uint lightType;
+    float selectionPdf;
+    if (!selectLightType(lightType, selectionPdf, sg)) return false;
 
     bool valid = false;
-    //if (kUseEnvLight && lightType == (uint)LightType::EnvMap) valid = generateEnvMapSample(vertex, sg, ls);
+    if (kUseEnvLight && lightType == (uint)LightType::EnvMap)
+    {
+        valid = generateEnvMapSample(vertex, sg, ls);
+    }
     if (kUseEmissiveLights && lightType == (uint)LightType::Emissive)
     {
         // Emissive light samplers have an option to exclusively sample the upper hemisphere.
         bool upperHemisphere = sampleUpperHemisphere && !sampleLowerHemisphere;
-        valid = generateEmissiveSample(vertex, upperHemisphere, sg, ls);
+        valid = generateEmissiveSample(vertex, upperHemisphere, sg, ls, d);
     }
     if (kUseAnalyticLights && lightType == (uint)LightType::Analytic)
     {
@@ -539,7 +560,9 @@ bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphe
     // Reject samples in non-requested hemispheres.
     float NdotL = dot(vertex.getOrientedFaceNormal(), ls.dir);
     if ((!sampleUpperHemisphere && NdotL >= -kMinCosTheta) || (!sampleLowerHemisphere && NdotL <= kMinCosTheta))
+    {
         return false;
+    }
 
     // Account for light type selection.
     ls.lightType = lightType;
@@ -593,7 +616,6 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     rayData.path_pdf_area *= rayData.g;        // convert pdf from solid angle to area for the segment that ends at this vertex
 
     // Add emitted light.
-    rayData.Le = float3(0.f, 0.f, 0.f);
     float misWeight = 1.f;
     float3 bsdf_p_hat = float3(0.f, 0.f, 0.f);
     if (kUseEmissiveLights && (kComputeDirect || rayData.pathLength > 0))
@@ -602,7 +624,6 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayData.radiance += rayData.thp * Le;
 
         bsdf_p_hat = rayData.p_hat_thp * Le;
-        rayData.Le = Le;
         if (any(Le > 0.f)) { // if emission was non zero, this is where you calculate mis weight for bsdf sampling
             //assume that we hit an emissive triangle and this is not the primary hit
 
@@ -624,7 +645,6 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     }
     // store bsdf sample data into rayData TODO might need to add some info when it comes time to do shift mappings.
     rayData.BSDFSample.p_hat_X = bsdf_p_hat;
-    rayData.misW = misWeight;
     rayData.BSDFSample.w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf_area;
 
     // Check whether to terminate based on max depth.
@@ -651,58 +671,8 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     rayData.lightSampledLower = false;
     rayData.NEESample = rayData.nextNEESample;
     rayData.nextNEESample = Sample::createNull();
-    
-    // Determine if BSDF has non-delta lobes.
-    const uint lobeTypes = mi.getLobeTypes(sd);
-    const bool hasNonDeltaLobes = (lobeTypes & (uint)LobeType::NonDelta) != 0;
 
-    if (hasNonDeltaLobes)
-    {
-        LightSample ls = {};
-        bool validSample = false;
-
-        // Setup path vertex.
-        //we use rayData.pathLength() as the vertex index
-        PathVertex vertex = PathVertex(rayData.pathLength, sd.posW, sd.faceN, sd.frontFacing);
-
-        // Determine if upper/lower hemispheres need to be sampled.
-        bool sampleUpperHemisphere = ((lobeTypes & (uint)LobeType::NonDeltaReflection) != 0);
-        bool sampleLowerHemisphere = ((lobeTypes & (uint)LobeType::NonDeltaTransmission) != 0);
-
-        // Sample a light.
-        validSample = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, rayData.sg, ls);
-        rayData.lightSampledUpper = sampleUpperHemisphere;
-        rayData.lightSampledLower = sampleLowerHemisphere;
-        if (validSample)
-        {
-            // Apply MIS weight.
-            float misWeight = 1.f;
-            if (ls.lightType != (uint)LightType::Analytic)
-            {
-                float scatterPdf = mi.evalPdf(sd, ls.dir, true); //true because we are using BSDF sampling
-                misWeight = evalMIS(1, ls.pdf, 1, scatterPdf);
-            }
-
-            float3 weight = mi.eval(sd, ls.dir, rayData.sg);
-            float3 Lr = weight * ls.Li;
-            if (any(Lr > 0.f))
-            {
-                bool visible = traceShadowRay(ls.origin, ls.dir, ls.distance);
-                if (visible)
-                {
-                    float3 nee_p_hat = rayData.p_hat_thp * Lr * ls.pdf; // since Li was already divided by pdf, we undivide to get the realization of f for this NEE sample
-                    rayData.nextNEESample.p_hat_X = nee_p_hat;
-                    float change_in_pdf = ls.pdf;
-                    if (ls.lightType == (uint)LightType::Emissive)
-                    {
-                        //for emissive, need to convert pdf from solid angle to area.
-                        //TODO multiply change in pdf by geometry term which we can store in ls
-                    } //for analytic and env map, don't need to convert since analytic doesn't use area and env map just stays in solid angle
-                    rayData.nextNEESample.w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf_area * change_in_pdf);
-                }
-            }
-        }
-    }
+    bool neeSampled = sampleNEE(sd, mi, rayData); // populates nextNEESample
 
     // Generate scatter ray for the next path segment.
     // The raygen shader will continue the path based on the returned payload.
@@ -713,6 +683,72 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     }
 
     rayData.pathLength++;
+}
+
+bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRayData rayData) {
+    // Determine if BSDF has non-delta lobes.
+    const uint lobeTypes = mi.getLobeTypes(sd);
+    const bool hasNonDeltaLobes = (lobeTypes & (uint)LobeType::NonDelta) != 0;
+
+    if (hasNonDeltaLobes)
+    {
+        LightSample ls = {};
+        bool validSample = false;
+
+        // Setup path vertex.
+        // we use rayData.pathLength() as the vertex index
+        PathVertex vertex = PathVertex(rayData.pathLength, sd.posW, sd.faceN, sd.frontFacing);
+
+        // Determine if upper/lower hemispheres need to be sampled.
+        bool sampleUpperHemisphere = ((lobeTypes & (uint)LobeType::NonDeltaReflection) != 0);
+        bool sampleLowerHemisphere = ((lobeTypes & (uint)LobeType::NonDeltaTransmission) != 0);
+
+        // Sample a light.
+        validSample = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, rayData.sg, rayData.d, ls);
+        rayData.lightSampledUpper = sampleUpperHemisphere;
+        rayData.lightSampledLower = sampleLowerHemisphere;
+        rayData.d.Li = { 0.f, 0.f, 0.f };
+        rayData.d.lightType = 10; // invalid value
+        rayData.d.li_pdf = ls.pdf;
+        if (validSample)
+        {
+            // Apply MIS weight.
+            float misWeight = 1.f;
+            if (ls.lightType != (uint)LightType::Analytic)
+            {
+                float scatterPdf = mi.evalPdf(sd, ls.dir, true); // true because we are using BSDF sampling
+                misWeight = evalMIS(1, ls.pdf, 1, scatterPdf);
+            }
+
+            float3 weight = mi.eval(sd, ls.dir, rayData.sg); //f * cos
+            float3 Lr = weight * ls.Li;
+            rayData.d.Li = ls.Li;
+            rayData.d.lightType = ls.lightType;
+            //rayData.d.lightWeight = weight;
+            if (any(Lr > 0.f))
+            {
+                bool visible = traceShadowRay(ls.origin, ls.dir, ls.distance);
+                //rayData.d.visible = visible;
+                if (visible)
+                {
+                    float3 nee_p_hat = rayData.p_hat_thp * Lr * ls.pdf; // since Li was already divided by pdf, we undivide to get the realization of f for this NEE sample
+                    float change_in_pdf = ls.pdf;
+                    if (ls.lightType == (uint)LightType::Emissive || ls.lightType == (uint)LightType::Analytic)
+                    {
+                        // for emissive, need to convert pdf from solid angle to area by multiplying by g. also multiply nee_p_hat by g.
+                        //for analytic, only certain types will need to be converted to solid angle. for the others, g will be set to 1
+                        nee_p_hat *= ls.g;
+                        change_in_pdf *= ls.g;
+                    } // for env map, don't need to convert since it stays in solid angle
+                    rayData.nextNEESample.p_hat_X = nee_p_hat;
+                    rayData.nextNEESample.w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf_area * change_in_pdf);
+                }
+            }
+            return true; //if Lr = 0, then nextNEESample is just going to stay null
+        }
+        return false;
+    }
+    return false;
 }
 
 /**
@@ -732,7 +768,6 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 {
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
     Reservoir r;
-    DebugData d;
     float3 outColor = float3(0.f);
 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
@@ -786,7 +821,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             outColor += temp;
             direct_illum += temp;
         }
-        diBuffer[bufferInd] = direct_illum; // add DI after you calculated W_X, the estimate of 1/pdf, using just the f of the actual integral
+        di_bgBuffer[bufferInd] = direct_illum; // add DI after you calculated W_X, the estimate of 1/pdf, using just the f of the actual integral
         // since its Le + (integral)f
 
         // Prepare ray payload.
@@ -796,10 +831,28 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         if (!generateScatterRay(sd, mi, isCurveHit, rayOrigin, rayData))
             rayData.terminated = true;
 
+        if(!rayData.terminated) {
+            // do nee for first bounce bc when that scatter ray gets traced we (might) need nextNEESample to represent the length 2 paths
+            bool neeSampled = sampleNEE(sd, mi, rayData);
+            r.X = rayData.nextNEESample;
+            if (r.X.w_i == 0.f) {
+                r.W_X = 0.f;
+            } else {
+                r.W_X = r.X.w_i / luminance(r.X.p_hat_X);
+            }
+            rayData.d.path_length = rayData.pathLength;
+            rayData.d.nee_p_hat = r.X.p_hat_X;
+            rayData.d.W_X = r.W_X;
+
+            debugSpareBuffer[bufferInd] = rayData.d;
+        }
+
         // Follow path into the scene and compute its total contribution.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene. so path length > 0 by now
         for (uint depth = 0; depth <= kMaxBounces && !rayData.terminated; depth++)
         {
+            break;
+
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             traceScatterRay(rayData);
@@ -809,26 +862,21 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             // updateReservoir(r, bsdf sample info)
             // updateReservoir(r, nee sample info)
 
-            // temporaily put bsdf samples into the reservoir, check if good
-            r.X = rayData.BSDFSample;
+            // temporaily put nee samples into the reservoir, check if good
+            r.X = rayData.NEESample;
             if (r.X.w_i == 0.f) {
                 r.W_X = 0.f;
             } else {
                 r.W_X = r.X.w_i / luminance(r.X.p_hat_X);
             }
 
-            d.path_length = rayData.pathLength;
-            d.thp = rayData.thp;
-            d.Le = rayData.Le;
-            d.bsdf_expected = d.thp * d.Le;
-            d.p_hat_thp = rayData.p_hat_thp;
-            d.bsdf_p_hat = rayData.BSDFSample.p_hat_X;
-            d.misWeight = rayData.misW;
-            d.lumi_bsdf_p_hat = luminance(d.bsdf_p_hat);
-            d.path_pdf_area = rayData.path_pdf_area;
-            d.bsdf_sampled = d.bsdf_p_hat * r.W_X;
+            /*d.path_length = rayData.pathLength;
+            d.nee_p_hat = r.X.p_hat_X;
+            d.W_X = r.W_X;
+            d.Li = rayData.Li;
+            d.lightType = rayData.lightType;
 
-            debugSpareBuffer[bufferInd] = d;
+            debugSpareBuffer[bufferInd] = rayData.d;*/
         }
 
         // Store contribution from scatter ray.
@@ -839,7 +887,8 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         // Background pixel.
         outColor = kUseEnvBackground ? gScene.envMap.eval(primaryRayDir) : kDefaultBackgroundColor;
 
-        //TODO rservoir is not updated when we dont hit anything
+        // we don't hit anything in the scene so this is completely independent from NEE and you don't even need restir for this
+        di_bgBuffer[bufferInd] = outColor; //this will be added onto a 0 reservoir value
     }
 
     return r;
@@ -860,6 +909,8 @@ void scatterMiss(inout ScatterRayData rayData)
     {
         float3 Le = gScene.envMap.eval(WorldRayDirection());
         rayData.radiance += rayData.thp * Le;
+
+        //need to do mis with bsdf sampling
     }
 }
 

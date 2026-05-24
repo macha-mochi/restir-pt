@@ -2,7 +2,7 @@
 
 //Inputs (will also modify reservoirs)
 RWStructuredBuffer<Reservoir> reservoirs;
-RWStructuredBuffer<float3> diBuffer; // direct illumination buffer, to be added to f_X * W_X at the end
+RWStructuredBuffer<float3> di_bgBuffer; // direct illumination / env map bg buffer, to be added to f_X * W_X at the end
 // Outputs
 RWTexture2D<float4> gOutputColor;
 
@@ -20,11 +20,11 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     uint bufferInd = pixel.y * dims.x + pixel.x;
     float3 f_X = reservoirs[bufferInd].X.p_hat_X;
     float W_X = reservoirs[bufferInd].W_X;
-    float3 di = diBuffer[bufferInd];
+    float3 di_bg = di_bgBuffer[bufferInd];
 
     //temporal
 
     //spatial
 
-    gOutputColor[pixel] = float4(f_X * W_X + di, 1.f);
+    gOutputColor[pixel] = float4(f_X * W_X + di_bg, 1.f);
 }

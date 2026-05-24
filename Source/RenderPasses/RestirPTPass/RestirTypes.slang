@@ -10,8 +10,6 @@ struct Reservoir
     float w_sum = 0; //sum of all lowercase w seen so far, for use in resampling
     uint M = 1;
     uint c = 0; //cap at 20
-
-    float3 direct_illumination; //DI at this pixel, to be added to f_X * W_X at the end
 };
 struct Sample {
     float3 x0; // first vertex
@@ -65,6 +63,7 @@ struct LightSample
     float distance; ///< Ray distance for visibility evaluation (shortened to avoid self-intersection).
     float3 dir;     ///< Ray direction for visibility evaluation (normalized).
     uint lightType; ///< Light type this sample comes from (LightType casted to uint).
+    float g = 0; ///< Geometry term for the light sample, only valid if the light sample is from an emissive triangle
 };
 
 /** Describes a path vertex.
