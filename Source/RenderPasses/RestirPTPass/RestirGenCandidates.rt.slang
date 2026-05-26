@@ -95,24 +95,21 @@ struct ShadowRayData
 };
 
 struct DebugData {
-    uint path_length;
+    uint path_length_from_cam;
 
-    float3 Li; // incoming radiance at nee vertex
-    float li_pdf;
-    uint lightType; //type of nee sampled light
-    float3 nee_p_hat; // p hat for nee sample
-    float W_X;
+    // bsdf sample info
+    float3 bsdf_p_hat;                  
+    float bsdfMISWeight;
 
-    /*float3 thp = { 1.f, 1.f, 1.f };             // normal throughput as found by the ray, including the divide by pdf
-    float3 Le; //emission, if any, at this vertex
-    float3 bsdf_expected; //thp * Le
+    // nee sample info
+    float3 nee_p_hat;
+    float neeMISWeight;
+    uint lightType; // type of nee sampled light
 
-    float3 bsdf_sampled; // the actual bsdf sample we got for this vertex, p_hat * W_X (from reservoir)
-    float3 p_hat_thp = { 1.f, 1.f, 1.f }; //the throughput we found for the phat without the divide by pdf
-    float3 bsdf_p_hat; //the bsdf p_hat we found for this sample
-    float misWeight;
-    float lumi_bsdf_p_hat;   // luminance of bsdf p hat
-    float path_pdf_area = 1; //pdf of path in area*/
+    //next nee sample info
+    float3 nextNEE_p_hat;
+    float nextNEEMISWeight;
+    uint nextLightType;
 }
 
 /**
@@ -643,9 +640,23 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
             misWeight = evalMIS(1, rayData.pdf, 1, lightPdf); //both of these r in solid angle
         }
     }
+    rayData.d.bsdf_p_hat = bsdf_p_hat;
+    rayData.d.bsdfMISWeight = misWeight;
     // store bsdf sample data into rayData TODO might need to add some info when it comes time to do shift mappings.
     rayData.BSDFSample.p_hat_X = bsdf_p_hat;
     rayData.BSDFSample.w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf_area;
+
+    //Update things for NEE, or if we don't end up doing it bc our path ends
+    rayData.lightSampledUpper = false;
+    rayData.lightSampledLower = false;
+    rayData.NEESample = rayData.nextNEESample;
+    rayData.nextNEESample = Sample::createNull();
+    rayData.d.nee_p_hat = rayData.NEESample.p_hat_X;
+    rayData.d.neeMISWeight = rayData.d.nextNEEMISWeight;
+    rayData.d.lightType = rayData.d.nextLightType;
+    rayData.d.nextNEE_p_hat = float3(0.f, 0.f, 0.f);
+    rayData.d.nextNEEMISWeight = 0.f;
+    rayData.d.nextLightType = 10; // invalid
 
     // Check whether to terminate based on max depth.
     if (rayData.pathLength >= kMaxBounces)
@@ -653,6 +664,8 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayData.terminated = true;
         return;
     }
+
+    rayData.pathLength++;
 
     // Compute ray origin for new rays spawned from the hit.
     float3 rayOrigin;
@@ -666,14 +679,6 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayOrigin = sd.computeRayOrigin();
     }
 
-    // This should be where you add NEE. but if we're processing kth hit rn, this NEE is for the (k+1)th vertex to be on a light.
-    rayData.lightSampledUpper = false;
-    rayData.lightSampledLower = false;
-    rayData.NEESample = rayData.nextNEESample;
-    rayData.nextNEESample = Sample::createNull();
-
-    bool neeSampled = sampleNEE(sd, mi, rayData); // populates nextNEESample
-
     // Generate scatter ray for the next path segment.
     // The raygen shader will continue the path based on the returned payload.
     if (!generateScatterRay(sd, mi, isCurveHit, rayOrigin, rayData))
@@ -682,7 +687,8 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         return;
     }
 
-    rayData.pathLength++;
+    // This should be where you add NEE. but if we're processing kth hit rn, this NEE is for the (k+1)th vertex to be on a light.
+    bool neeSampled = sampleNEE(sd, mi, rayData); // populates nextNEESample. we don't need to do this if our ray terminates above
 }
 
 bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRayData rayData) {
@@ -707,9 +713,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
         validSample = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, rayData.sg, rayData.d, ls);
         rayData.lightSampledUpper = sampleUpperHemisphere;
         rayData.lightSampledLower = sampleLowerHemisphere;
-        rayData.d.Li = { 0.f, 0.f, 0.f };
-        rayData.d.lightType = 10; // invalid value
-        rayData.d.li_pdf = ls.pdf;
+        //debugData attribtues for nextNEESample were already reset before this was called so we can just overwrite them
         if (validSample)
         {
             // Apply MIS weight.
@@ -722,13 +726,11 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
 
             float3 weight = mi.eval(sd, ls.dir, rayData.sg); //f * cos
             float3 Lr = weight * ls.Li;
-            rayData.d.Li = ls.Li;
-            rayData.d.lightType = ls.lightType;
-            //rayData.d.lightWeight = weight;
+            rayData.d.nextLightType = ls.lightType;
+            rayData.d.nextNEEMISWeight = misWeight;
             if (any(Lr > 0.f))
             {
                 bool visible = traceShadowRay(ls.origin, ls.dir, ls.distance);
-                //rayData.d.visible = visible;
                 if (visible)
                 {
                     float3 nee_p_hat = rayData.p_hat_thp * Lr * ls.pdf; // since Li was already divided by pdf, we undivide to get the realization of f for this NEE sample
@@ -740,6 +742,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                         nee_p_hat *= ls.g;
                         change_in_pdf *= ls.g;
                     } // for env map, don't need to convert since it stays in solid angle
+                    rayData.d.nextNEE_p_hat = nee_p_hat;
                     rayData.nextNEESample.p_hat_X = nee_p_hat;
                     rayData.nextNEESample.w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf_area * change_in_pdf);
                 }
@@ -833,50 +836,32 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 
         if(!rayData.terminated) {
             // do nee for first bounce bc when that scatter ray gets traced we (might) need nextNEESample to represent the length 2 paths
-            bool neeSampled = sampleNEE(sd, mi, rayData);
-            r.X = rayData.nextNEESample;
-            if (r.X.w_i == 0.f) {
-                r.W_X = 0.f;
-            } else {
-                r.W_X = r.X.w_i / luminance(r.X.p_hat_X);
-            }
-            rayData.d.path_length = rayData.pathLength;
-            rayData.d.nee_p_hat = r.X.p_hat_X;
-            rayData.d.W_X = r.W_X;
-
-            debugSpareBuffer[bufferInd] = rayData.d;
+            sampleNEE(sd, mi, rayData);
         }
 
         // Follow path into the scene and compute its total contribution.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene. so path length > 0 by now
         for (uint depth = 0; depth <= kMaxBounces && !rayData.terminated; depth++)
         {
-            break;
-
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             traceScatterRay(rayData);
 
-            // NEXT THING TO DO:
-            // you should probably perform RIS, resampling between current sample, bsdf sample, and nee sample for path of this length
+            // perform RIS, resampling between current sample, bsdf sample, and nee sample for path of this length
             // updateReservoir(r, bsdf sample info)
             // updateReservoir(r, nee sample info)
 
             // temporaily put nee samples into the reservoir, check if good
-            r.X = rayData.NEESample;
+            r.X = rayData.BSDFSample;
             if (r.X.w_i == 0.f) {
                 r.W_X = 0.f;
             } else {
                 r.W_X = r.X.w_i / luminance(r.X.p_hat_X);
             }
 
-            /*d.path_length = rayData.pathLength;
-            d.nee_p_hat = r.X.p_hat_X;
-            d.W_X = r.W_X;
-            d.Li = rayData.Li;
-            d.lightType = rayData.lightType;
+            rayData.d.path_length_from_cam = rayData.pathLength + 2;
 
-            debugSpareBuffer[bufferInd] = rayData.d;*/
+            debugSpareBuffer[bufferInd] = rayData.d;
         }
 
         // Store contribution from scatter ray.
@@ -910,7 +895,19 @@ void scatterMiss(inout ScatterRayData rayData)
         float3 Le = gScene.envMap.eval(WorldRayDirection());
         rayData.radiance += rayData.thp * Le;
 
-        //need to do mis with bsdf sampling
+        float3 bsdf_p_hat = rayData.p_hat_thp * Le;
+        float misWeight = 1.f;
+        if (any(Le > 0.f)) { // if emission was non zero, this is where you calculate mis weight for bsdf sampling
+            float lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(rayData.direction);
+
+            // Compute MIS weight by combining this with BSDF sampling.
+            // Note we can assume rayData.pdf > 0.f since we shouldn't have got here otherwise. it holds the pdf that the bsdf sampler chose this dir
+            misWeight = evalMIS(1, rayData.pdf, 1, lightPdf); // both of these r in solid angle
+        }
+        rayData.d.bsdfMISWeight = misWeight;
+        rayData.BSDFSample.p_hat_X = bsdf_p_hat;
+        rayData.BSDFSample.w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf_area;
+        //atp, path_pdf_area is the product of all the pdfs except the one for last vertex in area AND pdf of last vertex in solid angle
     }
 }
 

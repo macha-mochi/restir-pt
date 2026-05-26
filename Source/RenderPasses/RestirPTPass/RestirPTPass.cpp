@@ -43,7 +43,7 @@ const char kResampleComputeShaderFile[] = "RenderPasses/RestirPTPass/Resampling.
 //CANDIDATE GENERATION SETTINGS
 // Ray tracing settings that affect the traversal stack size.
 // These should be set as small as possible.
-const uint32_t kMaxPayloadSizeBytes = 256u;
+const uint32_t kMaxPayloadSizeBytes = 350u;
 const uint32_t kMaxRecursionDepth = 2u;
 
 const char kInputViewDir[] = "viewW";

@@ -8,8 +8,20 @@ struct Reservoir
 
     float W_X = 0;                              // unbiased contribution weight of sample X
     float w_sum = 0; //sum of all lowercase w seen so far, for use in resampling
-    uint M = 1;
     uint c = 0; //cap at 20
+
+    void updateReservoir(Reservoir r, Sample sample, float w_i_new, uint c_i, SampleGenerator sg) {
+        r.w_sum += w_i_new;
+        r.c += c_i;
+        if (w_i_new == 0) { // no chance to be chosen
+            return;
+        }
+        if (sampleNext1D(sg) < w_i_new / r.w_sum) {
+            // replace current sample with new one, if non null
+            r.X = sample;
+            r.W_X = r.w_sum / luminance(sample.p_hat_X); // if we got to this point, w_i_new is non zero meaning mi, p_hat, and W_X were all nonzero. so not a null sample
+        }
+    }
 };
 struct Sample {
     float3 x0; // first vertex
@@ -31,19 +43,7 @@ bool operator ==(const Sample s1, const Sample s2) {
 float luminance(float3 vec) {
     return dot(vec, float3(0.2126, 0.7152, 0.0722));
 }
-void updateReservoir(Reservoir r, Sample sample, float w_i_new, uint c_i, SampleGenerator sg) {
-    r.w_sum += w_i_new;
-    r.c += c_i;
-    if (w_i_new == 0) { //no chance to be chosen
-        return;
-    }
-    if (sampleNext1D(sg) < w_i_new / r.w_sum) {
-        // replace current sample with new one, if non null
-        r.X = sample;
-        r.W_X = r.w_sum / luminance(sample.p_hat_X); //if we got to this point, w_i_new is non zero meaning mi, p_hat, and W_X were all nonzero. so not a null sample
-        r.M++; //TODO check what M represents again? why r we incrementing it
-    }
-}
+
 /** Types of samplable lights.
  */
 enum class LightType
