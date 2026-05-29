@@ -71,8 +71,8 @@ Texture2D<float4> gViewW; // Optional
 
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> reservoirs;
-RWStructuredBuffer<DebugData> debugSpareBuffer;
 RWStructuredBuffer<float3> di_bgBuffer;
+RWStructuredBuffer<DebugData> debugSpareBuffer;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
@@ -112,10 +112,9 @@ struct DebugData {
     float nextnee_w_i;
     uint nextLightType;
 
-    float light_pdf;
-    float g;
-    float g_cos;
-    float dist;
+    float mis_bsdf;
+    float mis_nee;
+    float mis_nextnee;
 }
 
 /**
@@ -123,9 +122,7 @@ struct DebugData {
  */
 struct ScatterRayData
 {
-    float3 radiance;  ///< Accumulated outgoing radiance from path.
     bool terminated;  ///< Set to true when path is terminated.
-    float3 thp;       ///< Current path throughput. This is updated at each path vertex.
     uint pathLength;  ///< Path length in number of path segments (0 at origin, 1 at first secondary hit, etc.). Max 2^31.
     float3 origin;    ///< Next path segment origin.
     float3 normal;    ///< Shading normal at origin. Used for light sampling and MIS weight calculations.
@@ -153,8 +150,6 @@ struct ScatterRayData
     {
         this.terminated = false;
         this.pathLength = 0;
-        this.radiance = float3(0, 0, 0);
-        this.thp = float3(1, 1, 1);
         this.origin = float3(0, 0, 0);
         this.direction = float3(0, 0, 0);
         this.sg = sg;
@@ -290,49 +285,6 @@ void traceScatterRay(inout ScatterRayData rayData)
 }
 
 /**
- * Evaluates the direct illumination from analytic lights.
- * This function samples Falcor's light list uniformly with one shadow ray.
- * @param[in] sd Shading data.
- * @param[in] mi Material instance.
- * @param[in,out] sg SampleGenerator object.
- * @return Outgoing radiance in view direction.
- */
-float3 evalDirectAnalytic(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg)
-{
-    const uint lightCount = gScene.getLightCount();
-    if (lightCount == 0)
-        return float3(0.f);
-
-    // Pick one of the analytic light sources randomly with equal probability.
-    const uint lightIndex = min(uint(sampleNext1D(sg) * lightCount), lightCount - 1);
-    float invPdf = lightCount; // Light selection pdf = 1.0 / lightCount.
-
-    // Sample local light source.
-    AnalyticLightSample ls;
-    if (!sampleLight(sd.posW, gScene.getLight(lightIndex), sg, ls))
-        return float3(0.f);
-
-    // Reject sample if not in the hemisphere of a BSDF lobe.
-    const uint lobeTypes = mi.getLobeTypes(sd);
-    const bool hasReflection = lobeTypes & uint(LobeType::Reflection);
-    const bool hasTransmission = lobeTypes & uint(LobeType::Transmission);
-    float NdotL = dot(sd.getOrientedFaceNormal(), ls.dir);
-    if ((NdotL <= kMinCosTheta && !hasTransmission) || (NdotL >= -kMinCosTheta && !hasReflection))
-        return float3(0.f);
-
-    // Get origin with offset applied in direction of the geometry normal to avoid self-intersection.
-    const float3 origin = computeRayOrigin(sd.posW, dot(sd.faceN, ls.dir) >= 0.f ? sd.faceN : -sd.faceN);
-
-    // Test visibility by tracing a shadow ray.
-    bool V = traceShadowRay(origin, ls.dir, ls.distance);
-    if (!V)
-        return float3(0.f);
-
-    // Evaluate contribution.
-    return mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
-}
-
-/**
  * Generate a new scatter ray or terminate.
  * @param[in] sd Shading data.
  * @param[in] mi Material instance.
@@ -355,7 +307,6 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
             rayData.origin = sd.computeRayOrigin(false);
         }
         rayData.direction = bsdfSample.wo;
-        rayData.thp *= bsdfSample.weight;
 
         // additional info needed for restir
         // bsdfsample.weight = f * dot(wo, n) / pdf
@@ -364,7 +315,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         rayData.p_hat_thp *= f; //geometry term will be multiplied on the next bounce
         rayData.path_pdf_area *= bsdfSample.pdf; //pdf is in solid angle, converts to area upon a hit. TODO if this ray doesn't end up hitting anything then pdf might be wrong
 
-        return any(rayData.thp > 0.f);
+        return any(rayData.p_hat_thp > 0.f);
     }
 
     return false;
@@ -439,7 +390,7 @@ bool generateEmissiveSample(const PathVertex vertex, const bool upperHemisphere,
     \param[out] ls Struct describing valid samples.
     \return True if the sample is valid and has nonzero contribution, false otherwise.
 */
-bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator sg, out LightSample ls, inout DebugData d)
+bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator sg, out LightSample ls)
 {
     ls = {}; // Default initialization to avoid divergence at returns.
 
@@ -465,9 +416,6 @@ bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator 
     ls.distance = lightSample.distance;
     ls.dir = lightSample.dir;
     ls.g = (ls.distance == kMaxLightDistance || lightSample.pdf == 0) ? 1.f : (abs(dot(-ls.dir, lightSample.normalW)) / (ls.distance * ls.distance));
-
-    d.g_cos = abs(dot(-ls.dir, lightSample.normalW));
-    d.dist = ls.distance;
     //if dist squared is infinity you cant convert to area
 
     return any(ls.Li > 0.f);
@@ -538,8 +486,7 @@ bool selectLightType(out uint lightType, out float pdf, inout SampleGenerator sg
        \param[out] ls Struct describing valid samples.
        \return True if the sample is valid and has nonzero contribution, false otherwise.
    */
-bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphere, const bool sampleLowerHemisphere, inout SampleGenerator sg,
-                                inout DebugData d, out LightSample ls)
+bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphere, const bool sampleLowerHemisphere, inout SampleGenerator sg, out LightSample ls)
 {
     ls = {};
 
@@ -560,7 +507,7 @@ bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphe
     }
     if (kUseAnalyticLights && lightType == (uint)LightType::Analytic)
     {
-        valid = generateAnalyticLightSample(vertex, sg, ls, d);
+        valid = generateAnalyticLightSample(vertex, sg, ls);
     }
     if (!valid) return false;
 
@@ -575,9 +522,6 @@ bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphe
     ls.lightType = lightType;
     ls.pdf *= selectionPdf;
     ls.Li /= selectionPdf;
-
-    d.light_pdf = ls.pdf;
-    d.g = ls.g;
 
     return true;
 }
@@ -631,9 +575,8 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     if (kUseEmissiveLights && (kComputeDirect || rayData.pathLength > 0))
     {
         float3 Le = mi.getProperties(sd).emission;
-        rayData.radiance += rayData.thp * Le;
-
         bsdf_p_hat = rayData.p_hat_thp * Le;
+
         if (any(Le > 0.f)) { // if emission was non zero, this is where you calculate mis weight for bsdf sampling
             //assume that we hit an emissive triangle and this is not the primary hit
 
@@ -661,6 +604,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     rayData.BSDFSample = newBSDFSample;
     rayData.d.bsdf_p_hat = bsdf_p_hat;
     rayData.d.bsdf_w_i = newBSDFSample.w_i;
+    rayData.d.mis_bsdf = misWeight;
 
     //Update things for NEE, or if we don't end up doing it bc our path ends
     rayData.lightSampledUpper = false;
@@ -718,7 +662,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
         bool sampleLowerHemisphere = ((lobeTypes & (uint)LobeType::NonDeltaTransmission) != 0);
 
         // Sample a light.
-        validSample = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, rayData.sg, rayData.d, ls);
+        validSample = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, rayData.sg, ls);
         rayData.lightSampledUpper = sampleUpperHemisphere;
         rayData.lightSampledLower = sampleLowerHemisphere;
         //debugData attribtues for nextNEESample were already reset before this was called so we can just overwrite them
@@ -735,6 +679,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
             float3 weight = mi.eval(sd, ls.dir, rayData.sg); //f * cos
             float3 Lr = weight * ls.Li;
             rayData.d.nextLightType = ls.lightType;
+            rayData.d.mis_nextnee = misWeight;
             if (any(Lr > 0.f))
             {
                 bool visible = traceShadowRay(ls.origin, ls.dir, ls.distance);
@@ -782,7 +727,6 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 {
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
     Reservoir r;
-    float3 outColor = float3(0.f);
 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
     const float3 primaryRayDir = getPrimaryRayDir(pixel, frameDim, gScene.camera);
@@ -825,9 +769,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         if (kComputeDirect) //this code adds direct lighting, that is, emission from anything that the primary camera ray hit. TODO this is why ur version doesn't have DI!'
         {
             // Always output directly emitted light, independent of whether emissive materials are treated as light sources or not.
-            float3 temp = mi.getProperties(sd).emission;
-            outColor += temp;
-            direct_illum += temp;
+            direct_illum += mi.getProperties(sd).emission;
 
             //analytic lights used to be here but now they are accounted for by the first sampleNEE
         }
@@ -857,6 +799,12 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             if (depth != 0) {
                 r.updateReservoir(rayData.NEESample, rayData.NEESample.w_i, 1, sg); // since we alr updated reservoir with the first nee sample
             }
+            rayData.d.path_length_from_cam = rayData.pathLength + 2;
+            rayData.d.nee_p_hat = rayData.NEESample.p_hat_X;
+            rayData.d.nee_w_i = rayData.NEESample.w_i;
+            rayData.d.lightType = 10;
+            rayData.d.mis_nee = rayData.d.mis_nextnee;
+            rayData.d.mis_nextnee = 0.f;
 
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
@@ -864,27 +812,17 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 
             r.updateReservoir(rayData.BSDFSample, rayData.BSDFSample.w_i, 1, sg);
 
-            rayData.d.path_length_from_cam = rayData.pathLength + 2;
-            rayData.d.nee_p_hat = rayData.NEESample.p_hat_X;
-            rayData.d.nee_w_i = rayData.NEESample.w_i;
-            rayData.d.lightType = 10;
             rayData.d.nextNEE_p_hat = rayData.nextNEESample.p_hat_X;
             rayData.d.nextnee_w_i = rayData.nextNEESample.w_i;
             rayData.d.nextLightType = 10; // invalid
 
             debugSpareBuffer[bufferInd] = rayData.d;
         }
-
-        // Store contribution from scatter ray.
-        outColor += rayData.radiance;
     }
     else
     {
-        // Background pixel.
-        outColor = kUseEnvBackground ? gScene.envMap.eval(primaryRayDir) : kDefaultBackgroundColor;
-
-        // we don't hit anything in the scene so this is completely independent from NEE and you don't even need restir for this
-        di_bgBuffer[bufferInd] = outColor; //this will be added onto a 0 reservoir value
+        // Background pixel. We don't hit anything in the scene so this is completely independent from NEE and you don't even need restir for this
+        di_bgBuffer[bufferInd] = kUseEnvBackground ? gScene.envMap.eval(primaryRayDir) : kDefaultBackgroundColor; //this will be added onto a 0 reservoir value
     }
 
     return r;
@@ -905,9 +843,8 @@ void scatterMiss(inout ScatterRayData rayData)
     if (kUseEnvLight && (kComputeDirect || rayData.pathLength > 0))
     {
         float3 Le = gScene.envMap.eval(WorldRayDirection());
-        rayData.radiance += rayData.thp * Le;
-
         float3 bsdf_p_hat = rayData.p_hat_thp * Le;
+
         float misWeight = 1.f;
         if (any(Le > 0.f)) { // if emission was non zero, this is where you calculate mis weight for bsdf sampling
             float lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(rayData.direction);
@@ -920,6 +857,7 @@ void scatterMiss(inout ScatterRayData rayData)
         rayData.BSDFSample.w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf_area;
         rayData.d.bsdf_p_hat = bsdf_p_hat;
         rayData.d.bsdf_w_i = rayData.BSDFSample.w_i;
+        rayData.d.mis_bsdf = misWeight;
         //atp, path_pdf_area is the product of all the pdfs except the one for last vertex in area AND pdf of last vertex in solid angle
     }
 }
