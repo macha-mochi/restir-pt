@@ -158,7 +158,10 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mTracer.pProgram->addDefine("USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0");
     mTracer.pProgram->addDefine("USE_ENV_BACKGROUND", mpScene->useEnvBackground() ? "1" : "0");
     mTracer.pProgram->addDefines(mpSampleGenerator->getDefines());
-    mTracer.pProgram->addDefines(mpEmissiveSampler->getDefines());
+    if (mpEmissiveSampler)
+    {
+        mTracer.pProgram->addDefines(mpEmissiveSampler->getDefines());
+    }
 
     // For optional I/O resources, set 'is_valid_<name>' defines to inform the program of which ones it can access.
     // TODO: This should be moved to a more general mechanism using Slang.

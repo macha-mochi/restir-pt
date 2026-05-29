@@ -10,17 +10,18 @@ struct Reservoir
     float w_sum = 0; //sum of all lowercase w seen so far, for use in resampling
     uint c = 0; //cap at 20
 
-    void updateReservoir(Reservoir r, Sample sample, float w_i_new, uint c_i, SampleGenerator sg) {
-        r.w_sum += w_i_new;
-        r.c += c_i;
-        if (w_i_new == 0) { // no chance to be chosen
+    [mutating]
+    void updateReservoir(Sample sample, float w_i_new, uint c_i, SampleGenerator sg) {
+        w_sum += w_i_new;
+        c += c_i;
+        if (w_i_new == 0) { // no chance to be chosen and no need to update W_X since w_sum doesn't change
             return;
         }
-        if (sampleNext1D(sg) < w_i_new / r.w_sum) {
+        if (sampleNext1D(sg) < w_i_new / w_sum) {
             // replace current sample with new one, if non null
-            r.X = sample;
-            r.W_X = r.w_sum / luminance(sample.p_hat_X); // if we got to this point, w_i_new is non zero meaning mi, p_hat, and W_X were all nonzero. so not a null sample
+            X = sample;
         }
+        W_X = w_sum / luminance(X.p_hat_X); // if we got to this point, w_i_new is non zero meaning mi, p_hat, and W_X were all nonzero. so not a null sample
     }
 };
 struct Sample {
