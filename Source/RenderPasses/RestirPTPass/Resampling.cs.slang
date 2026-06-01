@@ -1,10 +1,12 @@
-#include "RestirTypes.slang"
+import RestirReservoir;
 
 //Inputs (will also modify reservoirs)
 RWStructuredBuffer<Reservoir> reservoirs;
 RWStructuredBuffer<float3> di_bgBuffer; // direct illumination / env map bg buffer, to be added to f_X * W_X at the end
 // Outputs
 RWTexture2D<float4> gOutputColor;
+
+static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
 
 /**
 * For now, just puts color to screen
@@ -25,6 +27,7 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     //temporal
 
     //spatial
+    //choose 3 random neighbors in a 20 pixel radius and resample
 
-    gOutputColor[pixel] = float4(f_X * W_X + di_bg, 1.f);
+    gOutputColor[pixel] = float4(kShiftMappingType, 0.f, 0.f, 1.f); //f_X * W_X + di_bg, 1.f);
 }

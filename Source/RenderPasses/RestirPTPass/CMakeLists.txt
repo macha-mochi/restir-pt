@@ -4,7 +4,8 @@ target_sources(RestirPTPass PRIVATE
     RestirPTPass.cpp
     RestirPTPass.h
     RestirGenCandidates.rt.slang
-    RestirTypes.slang
+    RestirTypes.slangh
+    RestirReservoir.slang
     Resampling.cs.slang
 )
 

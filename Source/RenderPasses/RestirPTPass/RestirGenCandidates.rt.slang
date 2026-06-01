@@ -42,7 +42,6 @@
  * is_valid_<name>         1 if optional I/O buffer with this name should be used.
  */
 
-#include "RestirTypes.slang"
 #include "Scene/SceneDefines.slangh"
 #include "Utils/Math/MathConstants.slangh"
 
@@ -55,6 +54,7 @@ import Rendering.Lights.EnvMapSampler;
 import Rendering.Lights.EmissiveLightSampler;
 import Rendering.Lights.EmissiveLightSamplerHelpers;
 import Rendering.Lights.LightHelpers;
+import RestirReservoir;
 
 cbuffer CB
 {
@@ -496,17 +496,17 @@ bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphe
     if (!selectLightType(lightType, selectionPdf, sg)) return false;
 
     bool valid = false;
-    if (kUseEnvLight && lightType == (uint)LightType::EnvMap)
+    if (kUseEnvLight && lightType == (uint)NEELightType::EnvMap)
     {
         valid = generateEnvMapSample(vertex, sg, ls);
     }
-    if (kUseEmissiveLights && lightType == (uint)LightType::Emissive)
+    if (kUseEmissiveLights && lightType == (uint)NEELightType::Emissive)
     {
         // Emissive light samplers have an option to exclusively sample the upper hemisphere.
         bool upperHemisphere = sampleUpperHemisphere && !sampleLowerHemisphere;
         valid = generateEmissiveSample(vertex, upperHemisphere, sg, ls);
     }
-    if (kUseAnalyticLights && lightType == (uint)LightType::Analytic)
+    if (kUseAnalyticLights && lightType == (uint)NEELightType::Analytic)
     {
         valid = generateAnalyticLightSample(vertex, sg, ls);
     }
@@ -671,7 +671,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
         {
             // Apply MIS weight.
             float misWeight = 1.f;
-            if (ls.lightType != (uint)LightType::Analytic)
+            if (ls.lightType != (uint)NEELightType::Analytic)
             {
                 float scatterPdf = mi.evalPdf(sd, ls.dir, true); // true because we are using BSDF sampling
                 misWeight = evalMIS(1, ls.pdf, 1, scatterPdf);
@@ -688,7 +688,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                 {
                     float3 nee_p_hat = rayData.p_hat_thp * Lr * ls.pdf; // since Li was already divided by pdf, we undivide to get the realization of f for this NEE sample
                     float change_in_pdf = ls.pdf;
-                    if (ls.lightType == (uint)LightType::Emissive || ls.lightType == (uint)LightType::Analytic)
+                    if (ls.lightType == (uint)NEELightType::Emissive || ls.lightType == (uint)NEELightType::Analytic)
                     {
                         // for emissive, need to convert pdf from solid angle to area by multiplying by g. also multiply nee_p_hat by g.
                         //for analytic, only certain types will need to be converted to solid angle. for the others, g will be set to 1

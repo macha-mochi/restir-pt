@@ -32,6 +32,8 @@
 #include "Rendering/Lights/EnvMapSampler.h"
 #include "Rendering/Lights/EmissiveLightSampler.h"
 
+#include "RestirTypes.slangh"
+
 using namespace Falcor;
 
 /**
@@ -81,6 +83,8 @@ private:
     bool mComputeDirect = true;
     /// Use importance sampling for materials.
     bool mUseImportanceSampling = true;
+    /// Type of shift mapping used
+    ShiftMappingType mShiftMappingType = ShiftMappingType::Reconnection;
 
     // Runtime data
 

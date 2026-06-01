@@ -64,6 +64,7 @@ const ChannelList kOutputChannels = {
 const char kMaxBounces[] = "maxBounces";
 const char kComputeDirect[] = "computeDirect";
 const char kUseImportanceSampling[] = "useImportanceSampling";
+const char kShiftMappingType[] = "shiftMappingType";
 
 } // namespace
 
@@ -85,8 +86,10 @@ void RestirPTPass::parseProperties(const Properties& props)
             mComputeDirect = value;
         else if (key == kUseImportanceSampling)
             mUseImportanceSampling = value;
+        else if (key == kShiftMappingType)
+            mShiftMappingType = value;
         else
-            logWarning("Unknown property '{}' in MinimalPathTracer properties.", key);
+            logWarning("Unknown property '{}' in RestirPTPass properties.", key);
     }
 }
 
@@ -96,6 +99,7 @@ Properties RestirPTPass::getProperties() const
     props[kMaxBounces] = mMaxBounces;
     props[kComputeDirect] = mComputeDirect;
     props[kUseImportanceSampling] = mUseImportanceSampling;
+    props[kShiftMappingType] = mShiftMappingType;
     return props;
 }
 
@@ -231,6 +235,8 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     //COMPUTE PASS STUFF BELOW
     //Add defines, prepare vars, set constants, and bind i/o buffers
     //don't add new defines here bc the compute pass is already set after you created it when you set the scene
+    auto program = mpSpatiotemporalResamplingPass->getProgram();
+    program->addDefine("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
 
     var = mpSpatiotemporalResamplingPass->getRootVar();
     var["reservoirs"] = mpReservoirBuffer;
@@ -265,6 +271,12 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
 
     dirty |= widget.checkbox("Use importance sampling", mUseImportanceSampling);
     widget.tooltip("Use importance sampling for materials", true);
+
+    dirty |= widget.checkbox("Test", mUseImportanceSampling);
+    widget.tooltip("This is a test tooltip for the test checkbox", true);
+
+    dirty |= widget.dropdown("Shift mapping type", mShiftMappingType);
+    widget.tooltip("What type of shift mapping to use for spatial/temporal reuse.", true);
 
     // If rendering options that modify the output have changed, set flag to indicate that.
     // In execute() we will pass the flag to other passes for reset of temporal data etc.
@@ -352,8 +364,9 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         {
             DefineList defines;
             mpScene->getShaderDefines(defines);
-            // defines.add("RTXDI_INSTALLED", "1");
+            
             defines.add(mpSampleGenerator->getDefines());
+            defines.add("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
 
             ProgramDesc desc;
             mpScene->getShaderModules(desc.shaderModules);
