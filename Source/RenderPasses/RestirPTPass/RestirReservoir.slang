@@ -7,12 +7,14 @@ struct Sample {
     float3 x0;      // first vertex
     float3 p_hat_X; // aka f, the realized contribution of this sample (no pdfs multiplied yet)
     float w_i; // w_i = (resampling MIS weight m_i) * (target function evaluated for X_i) / (pdf of sampling X_i), where reciprocal of pdf of X_i is just W_Xi
+    float3 jacobian_denom;
 
     static Sample createNull() {
         Sample s;
         s.x0 = { 0.f, 0.f, 0.f };
         s.p_hat_X = { 0.f, 0.f, 0.f };
         s.w_i = 0.f;
+        s.jacobian_denom = { 0.f, 0.f, 0.f };
         return s;
     }
 };

@@ -72,7 +72,7 @@ Texture2D<float4> gViewW; // Optional
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> reservoirs;
 RWStructuredBuffer<float3> di_bgBuffer;
-RWStructuredBuffer<DebugData> debugSpareBuffer;
+RWStructuredBuffer<DebugData> debugBuffer;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
@@ -134,7 +134,8 @@ struct ScatterRayData
     bool nonDelta; ///< (true if) bsdf sampled at last path vertex is nondelta
     float3 p_hat_thp;                   // Throughput for the p_hat calculations. doesn't include pdf, only bsdf * geo term
     float path_pdf_area;                        ///< Current path pdf (just multiplying) in terms of area
-    float g;                    // geometry term for the path segment leading to this vertex
+    float g;                                    // geometry term for the path segment leading to this vertex
+    float3 jacobian_denom;
 
     SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
 
@@ -159,6 +160,7 @@ struct ScatterRayData
         this.lightSampledUpper = false;
         this.lightSampledLower = false;
         this.normal = float3(0, 0, 0);
+        this.jacobian_denom = float3(0, 0, 0);
 
         this.d = {};
     }
@@ -311,9 +313,15 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         // bsdfsample.weight = f * dot(wo, n) / pdf
         // wo is normalized in world space
         rayData.p_hat_thp *= bsdfSample.weight; // geometry term will be multiplied on the next bounce
+        if (rayData.pathLength == 0) {
+            rayData.jacobian_denom *= bsdfSample.weight; //reconnection shift needs this info
+        }
         if (rayData.nonDelta) {
             rayData.p_hat_thp *= bsdfSample.pdf;
             rayData.path_pdf_area *= bsdfSample.pdf; // pdf is in solid angle, converts to area upon a hit. if this ray doesn't end up hitting anything, we leave in solid angle
+            if (rayData.pathLength == 0) {
+                rayData.jacobian_denom *= bsdfSample.pdf; //reconnection shift needs this info
+            }
         }
        
         return any(rayData.p_hat_thp > 0.f);
@@ -570,6 +578,11 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     rayData.p_hat_thp *= rayData.g;
     rayData.path_pdf_area *= rayData.g;        // convert pdf from solid angle to area for the segment that ends at this vertex
 
+    //add in the info for the reconnection shift
+    if (rayData.pathLength == 0) {
+        rayData.jacobian_denom = rayData.p_hat_thp;
+    }
+
     // Add emitted light.
     float misWeight = 1.f;
     float3 bsdf_p_hat = float3(0.f, 0.f, 0.f);
@@ -784,7 +797,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         // this must be done before the thp changes in generateScatterRay
         sampleNEE(sd, mi, rayData);
         r.updateReservoir(rayData.NEESample, rayData.NEESample.w_i, 1, sg);
-        debugSpareBuffer[bufferInd] = rayData.d;
+        debugBuffer[bufferInd] = rayData.d;
 
         // Generate scatter ray.
         if (!generateScatterRay(sd, mi, isCurveHit, rayOrigin, rayData))
@@ -811,8 +824,11 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 
             r.updateReservoir(rayData.BSDFSample, rayData.BSDFSample.w_i, 1, sg);
 
-            debugSpareBuffer[bufferInd] = rayData.d;
+            debugBuffer[bufferInd] = rayData.d;
         }
+
+        // reconnection shift: no matter which path from the path tree gets chosen, it all must go thru the first bounce
+        r.X.jacobian_denom = rayData.jacobian_denom;
     }
     else
     {

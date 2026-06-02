@@ -216,11 +216,11 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpReservoirBuffer->setName("ReservoirBuffer");
         var["reservoirs"] = mpReservoirBuffer;
     }
-    if (!mpDebugSpareBuffer || mpDebugSpareBuffer->getElementCount() < elementCount)
+    if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
     {
-        mpDebugSpareBuffer = mpDevice->createStructuredBuffer(var["debugSpareBuffer"], elementCount);
-        mpDebugSpareBuffer->setName("DebugSpareBuffer");
-        var["debugSpareBuffer"] = mpDebugSpareBuffer;
+        mpCandidateGenDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
+        mpCandidateGenDebugBuffer->setName("Candidate Debug Buffer");
+        var["debugBuffer"] = mpCandidateGenDebugBuffer;
     }
     if (!mpDiBgBuffer || mpDiBgBuffer->getElementCount() < elementCount)
     {
@@ -239,8 +239,16 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     program->addDefine("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
 
     var = mpSpatiotemporalResamplingPass->getRootVar();
+    var["CB"]["gFrameCount"] = mFrameCount;
+    var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
     var["reservoirs"] = mpReservoirBuffer;
     var["di_bgBuffer"] = mpDiBgBuffer;
+    if (!mpResamplingDebugBuffer || mpResamplingDebugBuffer->getElementCount() < elementCount)
+    {
+        mpResamplingDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
+        mpResamplingDebugBuffer->setName("Resampling Debug Buffer");
+        var["debugBuffer"] = mpResamplingDebugBuffer;
+    }
     //Bind outputs to the compute pass
     for (auto channel : kOutputChannels)
         bind(var, channel);
