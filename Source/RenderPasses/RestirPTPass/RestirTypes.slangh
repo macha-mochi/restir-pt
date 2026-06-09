@@ -15,6 +15,14 @@ FALCOR_ENUM_INFO(ShiftMappingType, {
 });
 FALCOR_ENUM_REGISTER(ShiftMappingType);
 
+/** A struct to store info needed to reconstruct a hit for reconnection shifts
+ */
+struct ShiftMappingInfo
+{
+    float3 x2; ///< 2nd vertex (if camera is x0) on the path, aka the one reconnection shift reconnects to
+    uint4 packedHitInfo; ///< Packed hit info for x2
+};
+
 /** Types of samplable lights. Named changed from LightType to avoid confusion with the analytic light types in LightHelpers
  */
 enum class NEELightType

@@ -73,7 +73,10 @@ RestirPTPass::RestirPTPass(ref<Device> pDevice, const Properties& props) : Rende
 
     // Create a sample generator.
     mpSampleGenerator = SampleGenerator::create(mpDevice, SAMPLE_GENERATOR_UNIFORM);
-    FALCOR_ASSERT(mpSampleGenerator); 
+    FALCOR_ASSERT(mpSampleGenerator);
+
+    mInputReservoirID = 0;
+    mOutputReservoirID = 1;
 }
 
 void RestirPTPass::parseProperties(const Properties& props)
@@ -210,23 +213,32 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     FALCOR_ASSERT(targetDim.x > 0 && targetDim.y > 0);
     // Create the reservoirs buffer here if needed since that's an output of ray gen pass
     uint32_t elementCount = targetDim.x * targetDim.y;
-    if (!mpReservoirBuffer || mpReservoirBuffer->getElementCount() < elementCount)
+
+    ref<Buffer> pCandidateBuffer = mpReservoirBuffers[mInputReservoirID];
+    if (!pCandidateBuffer || pCandidateBuffer->getElementCount() < elementCount)
     {
-        mpReservoirBuffer = mpDevice->createStructuredBuffer(var["reservoirs"], elementCount);
-        mpReservoirBuffer->setName("ReservoirBuffer");
-        var["reservoirs"] = mpReservoirBuffer;
+        pCandidateBuffer = mpDevice->createStructuredBuffer(var["gReservoirBuffer"], elementCount);
+        pCandidateBuffer->setName("Restir Candidate Reservoirs");
+        var["gReservoirBuffer"] = pCandidateBuffer;
+        mpReservoirBuffers[mInputReservoirID] = pCandidateBuffer;
     }
     if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
     {
         mpCandidateGenDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
-        mpCandidateGenDebugBuffer->setName("Candidate Debug Buffer");
+        mpCandidateGenDebugBuffer->setName("Restir Candidate Debug Buffer");
         var["debugBuffer"] = mpCandidateGenDebugBuffer;
     }
     if (!mpDiBgBuffer || mpDiBgBuffer->getElementCount() < elementCount)
     {
-        mpDiBgBuffer = mpDevice->createStructuredBuffer(var["di_bgBuffer"], elementCount);
-        mpDiBgBuffer->setName("DI_BG_Buffer");
-        var["di_bgBuffer"] = mpDiBgBuffer;
+        mpDiBgBuffer = mpDevice->createStructuredBuffer(var["gDI_BGBuffer"], elementCount);
+        mpDiBgBuffer->setName("Restir DI_BG_Buffer");
+        var["gDI_BGBuffer"] = mpDiBgBuffer;
+    }
+    if (!mpShiftMappingInfoBuffer || mpShiftMappingInfoBuffer->getElementCount() < elementCount)
+    {
+        mpShiftMappingInfoBuffer = mpDevice->createStructuredBuffer(var["gShiftMappingInfoBuffer"], elementCount);
+        mpShiftMappingInfoBuffer->setName("Restir Shift Mapping Info Buffer");
+        var["gShiftMappingInfoBuffer"] = mpShiftMappingInfoBuffer;
     }
 
     // Spawn the rays.
@@ -241,17 +253,32 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     var = mpSpatiotemporalResamplingPass->getRootVar();
     var["CB"]["gFrameCount"] = mFrameCount;
     var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
-    var["reservoirs"] = mpReservoirBuffer;
-    var["di_bgBuffer"] = mpDiBgBuffer;
+
+    var["gCandidateBuffer"] = mpReservoirBuffers[mInputReservoirID];
+    ref<Buffer> pResampledBuffer = mpReservoirBuffers[mOutputReservoirID];
+    if (!pResampledBuffer || pResampledBuffer->getElementCount() < elementCount)
+    {
+        pResampledBuffer = mpDevice->createStructuredBuffer(var["gResampledBuffer"], elementCount);
+        pResampledBuffer->setName("Restir Resampled Reservoirs");
+        var["gResampledBuffer"] = pResampledBuffer;
+        mpReservoirBuffers[mOutputReservoirID] = pResampledBuffer;
+    }
+    var["gDI_BGBuffer"] = mpDiBgBuffer;
+    var["gShiftMappingInfoBuffer"] = mpShiftMappingInfoBuffer;
     if (!mpResamplingDebugBuffer || mpResamplingDebugBuffer->getElementCount() < elementCount)
     {
         mpResamplingDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
-        mpResamplingDebugBuffer->setName("Resampling Debug Buffer");
+        mpResamplingDebugBuffer->setName("Restir Resampling Debug Buffer");
         var["debugBuffer"] = mpResamplingDebugBuffer;
     }
-    //Bind outputs to the compute pass
+    //Bind inputs and outputs to the compute pass
+    for (auto channel : kInputChannels)
+    {
+        bind(var, channel);
+    }
     for (auto channel : kOutputChannels)
         bind(var, channel);
+    mpScene->bindShaderData(var["gScene"]); //binds the Scene parameter block (as seen in Scene.slang w all the vertex and geometry buffers)
     
     //TODO execute compute passes here
     /* uint32_t outputReservoirID = 1 - lastFrameReservoirID;

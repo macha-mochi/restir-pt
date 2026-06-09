@@ -103,8 +103,13 @@ private:
     //Resources
     ref<Buffer> mpCandidateGenDebugBuffer; ///< Spare buffer for debugging purposes. TODO: remove later, or convert into ping pong
     ref<Buffer> mpResamplingDebugBuffer;
-    ref<Buffer> mpReservoirBuffer; ///< Buffer storing path reservoirs TODO: probably need a second one to ping pong
+
+    ref<Buffer> mpReservoirBuffers[2]; ///< Length 2 array containing buffers of path reservoirs
+    uint mInputReservoirID; ///< these will be 0 or 1
+    uint mOutputReservoirID;
+
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
+    ref<Buffer> mpShiftMappingInfoBuffer; ///< Buffer storing the shift mapping info for each pixel, used for spatial/temporal reuse
 
     //Compute passes
     //do you need one for testing candidate visibility??
