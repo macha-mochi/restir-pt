@@ -17,10 +17,31 @@ FALCOR_ENUM_REGISTER(ShiftMappingType);
 
 /** A struct to store info needed to reconstruct a hit for reconnection shifts
  */
-struct ShiftMappingInfo
+struct RCVertex
 {
-    float3 x2; ///< 2nd vertex (if camera is x0) on the path, aka the one reconnection shift reconnects to
-    uint4 packedHitInfo; ///< Packed hit info for x2
+    float3 outgoingDir; // outgoing w_o from reconnection vert x_k
+    float3 incomingRadiance; // L incoming at x_k, along rcOutgoingDir
+    uint4 packedHitInfo; ///< Packed hit info for reconnection vertex
+    uint prevSampledLobeType; //will be a LobeType uint, representing which lobe type got sampled for vert x_(k-1)
+    uint sampledLobeType; //LobeType uint, representing lobe type sampled for vert x_k
+
+    #ifndef HOST_CODE
+    __init(){
+        outgoingDir = {0.f, 0.f, 0.f};
+        incomingRadiance = {0.f, 0.f, 0.f};
+        packedHitInfo = {0, 0, 0, 0};
+        prevSampledLobeType = 0;
+        sampledLobeType = 0;
+    }
+
+    __init(float3 wo, float3 Li, uint4 packedHit, uint prevLobeType, uint curLobeType){
+        outgoingDir = wo;
+        incomingRadiance = Li;
+        packedHitInfo = packedHit;
+        prevSampledLobeType = prevLobeType;
+        sampledLobeType = curLobeType;
+    }
+    #endif
 };
 
 /** Types of samplable lights. Named changed from LightType to avoid confusion with the analytic light types in LightHelpers

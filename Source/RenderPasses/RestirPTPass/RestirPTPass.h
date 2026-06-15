@@ -109,7 +109,6 @@ private:
     uint mOutputReservoirID;
 
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
-    ref<Buffer> mpShiftMappingInfoBuffer; ///< Buffer storing the shift mapping info for each pixel, used for spatial/temporal reuse
 
     //Compute passes
     //do you need one for testing candidate visibility??

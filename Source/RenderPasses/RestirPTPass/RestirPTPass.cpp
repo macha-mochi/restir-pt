@@ -234,12 +234,6 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpDiBgBuffer->setName("Restir DI_BG_Buffer");
         var["gDI_BGBuffer"] = mpDiBgBuffer;
     }
-    if (!mpShiftMappingInfoBuffer || mpShiftMappingInfoBuffer->getElementCount() < elementCount)
-    {
-        mpShiftMappingInfoBuffer = mpDevice->createStructuredBuffer(var["gShiftMappingInfoBuffer"], elementCount);
-        mpShiftMappingInfoBuffer->setName("Restir Shift Mapping Info Buffer");
-        var["gShiftMappingInfoBuffer"] = mpShiftMappingInfoBuffer;
-    }
 
     // Spawn the rays.
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
@@ -264,7 +258,6 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpReservoirBuffers[mOutputReservoirID] = pResampledBuffer;
     }
     var["gDI_BGBuffer"] = mpDiBgBuffer;
-    var["gShiftMappingInfoBuffer"] = mpShiftMappingInfoBuffer;
     if (!mpResamplingDebugBuffer || mpResamplingDebugBuffer->getElementCount() < elementCount)
     {
         mpResamplingDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);

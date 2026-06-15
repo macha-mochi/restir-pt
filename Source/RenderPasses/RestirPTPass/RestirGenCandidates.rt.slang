@@ -71,8 +71,7 @@ Texture2D<float4> gViewW; // Optional
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> gReservoirBuffer;
 RWStructuredBuffer<float3> gDI_BGBuffer;
-RWStructuredBuffer<ShiftMappingInfo> gShiftMappingInfoBuffer;
-RWStructuredBuffer<DebugData> debugBuffer;
+RWStructuredBuffer<float3> debugBuffer;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
@@ -98,27 +97,45 @@ struct DebugData {
     uint path_length_from_cam;
     bool missed;
 
-    /*
-    // bsdf sample info
-    float3 bsdf_p_hat;                  
-    float bsdf_w_i;
+    float3 bsdf_p_hat;
+    float wi;
 
-    // nee sample info
+    uint curVert;
+    float3 bsdf1;
+    float3 bsdf2;
+    float3 mi_eval1;
+    float3 mi_eval2;
+    float3 wo_x1x2;
+
+    __init() {
+        curVert = 0;
+        bsdf1 = { 0.f, 0.f, 0.f };
+        bsdf2 = { 0.f, 0.f, 0.f };
+        mi_eval1 = { 0.f, 0.f, 0.f };
+        mi_eval2 = { 0.f, 0.f, 0.f };
+    }
+}
+
+struct SampleData{
+    float3 bsdf_p_hat;
+    float bsdf_w_i;
     float3 nee_p_hat;
     float nee_w_i;
-
-    float mis_bsdf;
-    float mis_nee;
-    bool transmission;
-    float pdf;
-    bool nonDelta;*/
-
-    int x2InstanceID;
-    int x2PrimitiveIndex;
+    uint4 rcPackedHitInfo;
+    uint prevSampledLobeType;
+    uint sampledLobeType;
+    float3 x3_nee_wo;
 
     __init(){
-        x2InstanceID = -1;
-        x2PrimitiveIndex = -1;
+        bsdf_p_hat = {0.f, 0.f, 0.f};
+        bsdf_w_i = 0.f;
+        nee_p_hat = {0.f, 0.f, 0.f};
+        nee_w_i = 0.f;
+
+        rcPackedHitInfo = {0, 0, 0, 0};
+        prevSampledLobeType = 0;
+        sampledLobeType = 0;
+        x3_nee_wo = { 0.f, 0.f, 0.f };
     }
 }
 
@@ -135,15 +152,12 @@ struct ScatterRayData
     float3 direction; ///< Next path segment direction.
 
     // added for restir
-    Sample BSDFSample;
-    Sample NEESample;
     bool lightSampledUpper; ///< (true if) Last path vertex sampled lights using NEE (in upper hemisphere).
     bool lightSampledLower; ///< (true if) Last path vertex sampled lights using NEE (in lower hemisphere).
     bool nonDelta; ///< (true if) bsdf sampled at last path vertex is nondelta
     float3 p_hat_thp;                   // Throughput for the p_hat calculations. doesn't include pdf, only bsdf * geo term
-    float path_pdf_area;                        ///< Current path pdf (just multiplying) in terms of area
-    float g;                                    // geometry term for the path segment leading to this vertex
-    PackedHitInfo reconnectionVertHitInfo;
+    float path_pdf;                        ///< Current path pdf (just multiplying) in terms of solid angle (changed from area)
+    SampleData sampleData;
 
     SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
 
@@ -160,14 +174,12 @@ struct ScatterRayData
         this.direction = float3(0, 0, 0);
         this.sg = sg;
 
-        this.BSDFSample = Sample::createNull();
-        this.NEESample = Sample::createNull();
         this.p_hat_thp = float3(1, 1, 1);
-        this.path_pdf_area = 1.f;
-        this.g = 1.f;
+        this.path_pdf = 1.f;
         this.lightSampledUpper = false;
         this.lightSampledLower = false;
         this.normal = float3(0, 0, 0);
+        this.sampleData = {};
 
         this.d = {};
     }
@@ -257,7 +269,6 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         rayData.origin = rayOrigin;
         rayData.normal = sd.getOrientedFaceNormal();
         rayData.pdf = bsdfSample.pdf;
-        //rayData.d.pdf = bsdfSample.pdf;
         rayData.nonDelta = bsdfSample.isLobe(LobeType::NonDelta);
         if (!isCurveHit && bsdfSample.isLobe(LobeType::Transmission))
         {
@@ -269,14 +280,28 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         // additional info needed for restir
         // bsdfsample.weight = f * dot(wo, n) / pdf
         // wo is normalized in world space
-        rayData.p_hat_thp *= bsdfSample.weight; // geometry term will be multiplied on the next bounce
+        rayData.p_hat_thp *= bsdfSample.weight;
         if (rayData.nonDelta) {
             rayData.p_hat_thp *= bsdfSample.pdf;
-            rayData.path_pdf_area *= bsdfSample.pdf; // pdf is in solid angle, converts to area upon a hit. if this ray doesn't end up hitting anything, we leave in solid angle
+            rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
+        }
+        rayData.sampleData.prevSampledLobeType = rayData.sampleData.sampledLobeType;
+        rayData.sampleData.sampledLobeType = bsdfSample.lobeType;
+
+        if(rayData.d.curVert == 0) {
+            // first generate scatter ray
+            rayData.d.bsdf1 = bsdfSample.weight * (rayData.nonDelta ? bsdfSample.pdf : 1.f);
+            rayData.d.curVert++;
+        }else if(rayData.d.curVert == 1) {
+            // 2nd generate
+            rayData.d.bsdf2 = bsdfSample.weight * (rayData.nonDelta ? bsdfSample.pdf : 1.f);
+            rayData.d.curVert++;
         }
 
         return any(rayData.p_hat_thp > 0.f);
     }
+    rayData.sampleData.prevSampledLobeType = rayData.sampleData.sampledLobeType;
+    rayData.sampleData.sampledLobeType = (uint)LobeType::None;
 
     return false;
 }
@@ -513,6 +538,10 @@ float evalMIS(float n0, float p0, float n1, float p1)
  */
 void handleHit(const HitInfo hit, inout ScatterRayData rayData)
 {
+    if (rayData.pathLength == 0) { // we hit vertex x2
+        rayData.sampleData.rcPackedHitInfo = hit.pack();
+    }
+
     const bool isCurveHit = hit.getType() == HitType::Curve;
 
     // Load shading data.
@@ -521,13 +550,6 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     // Create material instance.
     let lod = ExplicitLodTextureSampler(0.f);
     let mi = gScene.materials.getMaterialInstance(sd, lod);
-
-    // Multiply path_pdf_area by pdf and geometry term for the path segment that led to this hit
-    float cos = abs(dot(-rayData.direction, sd.faceN)); // sd.faceN is face normal in world space on the front facing side. is probably unit?
-    float3 dist = sd.posW - rayData.origin;
-    rayData.g = cos / dot(dist, dist); //(hit point) - (origin of ray that hit this point)
-    rayData.p_hat_thp *= rayData.g;
-    rayData.path_pdf_area *= rayData.g;        // convert pdf from solid angle to area for the segment that ends at this vertex
 
     // Add emitted light.
     float misWeight = 1.f;
@@ -556,15 +578,9 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
             misWeight = evalMIS(1, rayData.pdf, 1, lightPdf); //both of these r in solid angle
         }
     }
-    // store bsdf sample data into rayData TODO might need to add some info when it comes time to do shift mappings.
-    Sample newBSDFSample;
-    newBSDFSample.p_hat_X = bsdf_p_hat;
-    newBSDFSample.w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf_area;
-    //new bsdf sample's jacobian denom will get updated in the main tracePath loop after thp changes for bouncing off x2
-    rayData.BSDFSample = newBSDFSample;
-    /*rayData.d.bsdf_p_hat = bsdf_p_hat;
-    rayData.d.bsdf_w_i = newBSDFSample.w_i;
-    rayData.d.mis_bsdf = misWeight;*/
+    // update curBSDFSample, which alr contains rc info from genScatterRay
+    rayData.sampleData.bsdf_p_hat = bsdf_p_hat;
+    rayData.sampleData.bsdf_w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf;
 
     // Check whether to terminate based on max depth.
     if (rayData.pathLength >= kMaxBounces)
@@ -598,6 +614,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayData.terminated = true;
         return;
     }
+    rayData.d.mi_eval2 = mi.eval(sd, rayData.direction, rayData.sg);
 
     rayData.pathLength++;
 }
@@ -606,7 +623,6 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
     // Determine if BSDF has non-delta lobes.
     const uint lobeTypes = mi.getLobeTypes(sd);
     const bool hasNonDeltaLobes = (lobeTypes & (uint)LobeType::NonDelta) != 0;
-    //rayData.d.nonDelta = hasNonDeltaLobes;
 
     if (hasNonDeltaLobes)
     {
@@ -625,7 +641,6 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
         validSample = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, rayData.sg, ls);
         rayData.lightSampledUpper = sampleUpperHemisphere;
         rayData.lightSampledLower = sampleLowerHemisphere;
-        //debugData attribtues for nextNEESample were already reset before this was called so we can just overwrite them
         if (validSample)
         {
             // Apply MIS weight.
@@ -638,8 +653,6 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
 
             float3 weight = mi.eval(sd, ls.dir, rayData.sg); //f * cos
             float3 Lr = weight * ls.Li;
-            // rayData.d.lightType = ls.lightType;
-            //rayData.d.mis_nee = misWeight;
             if (any(Lr > 0.f))
             {
                 bool visible = traceShadowRay(ls.origin, ls.dir, ls.distance);
@@ -647,31 +660,26 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                 {
                     float3 nee_p_hat = rayData.p_hat_thp * Lr * ls.pdf; // since Li was already divided by pdf, we undivide to get the realization of f for this NEE sample
                     float change_in_pdf = ls.pdf;
-                    if (ls.lightType == (uint)NEELightType::Emissive || ls.lightType == (uint)NEELightType::Analytic)
+                    /*if (ls.lightType == (uint)NEELightType::Emissive || ls.lightType == (uint)NEELightType::Analytic) //this code is for parametrizing path in area measure
                     {
                         // for emissive, need to convert pdf from solid angle to area by multiplying by g. also multiply nee_p_hat by g.
                         //for analytic, only certain types will need to be converted to solid angle. for the others, g will be set to 1
-                        nee_p_hat *= ls.g;
-                        change_in_pdf *= ls.g;
-                    } // for env map, don't need to convert since it stays in solid angle
-                    Sample newNEESample;
-                    newNEESample.p_hat_X = nee_p_hat;
-                    newNEESample.w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf_area * change_in_pdf);
+                        //nee_p_hat *= ls.g;
+                        //change_in_pdf *= ls.g;
+                    } // for env map, don't need to convert since it stays in solid angle */
+
+                    rayData.sampleData.nee_p_hat = nee_p_hat;
+                    rayData.sampleData.nee_w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf * change_in_pdf);
                     if(rayData.pathLength == 0) {
                         // we are either in the first sampleNEE before traceScatterRay loop (x2 == nee vert) or in the first one called by handleHit (x3 == nee vert)
-                        // rayData.thp will be 1 so multiplying by attenuation at this vert will still be bsdf * G from x1
-                        float actualG = ls.lightType == (uint)NEELightType::EnvMap ? 1.f : ls.g;
-                        newNEESample.jacobian_denom = rayData.p_hat_thp * weight * actualG;
-                        newNEESample.reconnection_vert_wo = ls.dir;
+                        rayData.sampleData.x3_nee_wo = ls.dir;
+                        //dont need incomingRadiance for now
+                        //packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
                     }
-                    rayData.NEESample = newNEESample;
-                    //rayData.d.nee_p_hat = nee_p_hat;
-                    //rayData.d.nee_w_i = newNEESample.w_i;
+                    return true;
                 }
             }
-            return true; //if Lr = 0, then nextNEESample is just going to stay null
         }
-        return false;
     }
     return false;
 }
@@ -745,54 +753,64 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         // Prepare ray payload.
         ScatterRayData rayData = ScatterRayData(sg);
 
-        // do nee for first bounce bc when that scatter ray gets traced we (might) need nextNEESample to represent the length 2 paths
+        // Initialize data carriers
+        Sample curBSDFSample = Sample::createNull();
+        Sample curNEESample = Sample::createNull();
+        RCVertex rcVertex = {};
+
+        // do nee for first bounce bc when that scatter ray gets traced we (might) need NEESample to represent the length 2 paths
         // this must be done before the thp changes in generateScatterRay
         sampleNEE(sd, mi, rayData);
-        rayData.NEESample.jacobian_denom = {0.f, 0.f, 0.f}; // make it 0 since we don't consider length 2 paths
-        r.updateReservoir(rayData.NEESample, rayData.NEESample.w_i, 1, sg);
-        debugBuffer[bufferInd] = rayData.d;
+        curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex); //rcvertex is invalid for this vert bc length 2 paths are invalid
+        r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg);
+        //debugBuffer[bufferInd] = rayData.d;
 
         // Generate scatter ray.
         if (!generateScatterRay(sd, mi, isCurveHit, rayOrigin, rayData))
             rayData.terminated = true;
 
-        float3 reconnection_j_denom = { 0.f, 0.f, 0.f };
-        float3 reconnection_vert_wo = { 0.f, 0.f, 0.f };
-        ShiftMappingInfo shiftInfo = {};
+        rayData.d.mi_eval1 = mi.eval(sd, rayData.direction, sg);
+        rayData.d.wo_x1x2 = rayData.direction;
+
         // Follow path into the scene and compute its total contribution.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene. so path length > 0 by now
         for (uint depth = 0; depth <= kMaxBounces && !rayData.terminated; depth++)
         {
             // Update NEE things
             if (depth != 0) {
-                //the first time this code runs it's our x3 NEESample w the special reconnection jacobian denom
-                r.updateReservoir(rayData.NEESample, rayData.NEESample.w_i, 1, sg); // since we alr updated reservoir with the first nee sample
+                if (depth == 1) {
+                    // the first time this code runs it's our x3 NEESample w special case handled in rcVertex
+                    RCVertex neeX2 = rcVertex;
+                    neeX2.outgoingDir = rayData.sampleData.x3_nee_wo;
+                    neeX2.sampledLobeType = (uint)LobeType::All;
+                    curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, neeX2);
+                } else {
+                    curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex);
+                }
+                r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg); // since we alr updated reservoir with the first nee sample
             }
-            rayData.NEESample = Sample::createNull(); // this way even if ray misses and handleHit is not called, NEESample gets updated
-            rayData.NEESample.jacobian_denom = reconnection_j_denom; //when depth = 0 it doesn't matter since we'll reset it anyway in sampleNEE. when depth != 0 reconnection_j_demo has been set and so every later NEESample gets it
-
+            rayData.sampleData.nee_p_hat = { 0.f, 0.f, 0.f };
+            rayData.sampleData.nee_w_i = 0.f;
+            
             rayData.d.path_length_from_cam = rayData.pathLength + 2;
 
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             traceScatterRay(rayData);
             if (depth == 0) { // this is for the first indirect bounce
-                reconnection_j_denom = rayData.p_hat_thp; // at this point, thp is (bsdf * g for x1) * (bsdf * cos for x2) if genScatterRay succeeded
-                reconnection_vert_wo = rayData.direction; //if gen scatter ray succeeded this is dir from x2 to x3
                 if (!rayData.terminated) {
-                    //if kmaxbounces was 0 or we hit env map or scatter ray failed, would terminate here and we leave shiftInfo as null
-                    //otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path. only case not covered would be an NEE length 2 path
-                    shiftInfo.x2 = rayData.origin;
-                    shiftInfo.packedHitInfo = rayData.reconnectionVertHitInfo;
+                    // if kmaxbounces was 0 or we hit env map or scatter ray failed, would terminate here and we clear rc vertex since it'd be length 2 BSDF path
+                     //otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path. only case not covered would be an NEE length 2 path
+                    // if gen scatter ray succeeded, rayData.direction is dir from x2 to x3
+                    rcVertex = RCVertex(rayData.direction, { 0.f, 0.f, 0.f }, rayData.sampleData.rcPackedHitInfo,
+                        rayData.sampleData.prevSampledLobeType, rayData.sampleData.sampledLobeType);
                 }
             }
-            rayData.BSDFSample.jacobian_denom = reconnection_j_denom;
-            rayData.BSDFSample.reconnection_vert_wo = reconnection_vert_wo;
-            r.updateReservoir(rayData.BSDFSample, rayData.BSDFSample.w_i, 1, sg);
+            curBSDFSample = Sample(rayData.sampleData.bsdf_p_hat, rayData.sampleData.bsdf_w_i, rcVertex);
+            r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg);
 
-            debugBuffer[bufferInd] = rayData.d;
+            debugBuffer[bufferInd] = curBSDFSample.p_hat;
         }
-        gShiftMappingInfoBuffer[bufferInd] = shiftInfo;
     }
     else
     {
@@ -828,12 +846,11 @@ void scatterMiss(inout ScatterRayData rayData)
             // Note we can assume rayData.pdf > 0.f since we shouldn't have got here otherwise. it holds the pdf that the bsdf sampler chose this dir
             misWeight = evalMIS(1, rayData.pdf, 1, lightPdf); // both of these r in solid angle
         }
-        rayData.BSDFSample.p_hat_X = bsdf_p_hat;
-        rayData.BSDFSample.w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf_area;
-        /*rayData.d.bsdf_p_hat = bsdf_p_hat;
-        rayData.d.bsdf_w_i = rayData.BSDFSample.w_i;
-        rayData.d.mis_bsdf = misWeight;*/
-        //atp, path_pdf_area is the product of all the pdfs except the one for last vertex in area AND pdf of last vertex in solid angle
+        rayData.sampleData.bsdf_p_hat = bsdf_p_hat;
+        rayData.sampleData.bsdf_w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf;
+    } else {
+        rayData.sampleData.bsdf_p_hat = { 0.f, 0.f, 0.f };
+        rayData.sampleData.bsdf_w_i = 0.f;
     }
 }
 
@@ -866,13 +883,7 @@ void scatterTriangleMeshClosestHit(inout ScatterRayData rayData, BuiltInTriangle
     triangleHit.instanceID = getGeometryInstanceID();
     triangleHit.primitiveIndex = PrimitiveIndex();
     triangleHit.barycentrics = attribs.barycentrics;
-    HitInfo hi = HitInfo(triangleHit);
-    if (rayData.pathLength == 0) { // we hit vertex x2
-        rayData.reconnectionVertHitInfo = hi.pack();
-        rayData.d.x2InstanceID = triangleHit.instanceID.index;
-        rayData.d.x2PrimitiveIndex = triangleHit.primitiveIndex;
-    }
-    handleHit(hi, rayData);
+    handleHit(HitInfo(triangleHit), rayData);
 }
 
 [shader("anyhit")]
@@ -910,11 +921,7 @@ void scatterDisplacedTriangleMeshClosestHit(inout ScatterRayData rayData, Displa
     displacedTriangleHit.primitiveIndex = PrimitiveIndex();
     displacedTriangleHit.barycentrics = attribs.barycentrics;
     displacedTriangleHit.displacement = attribs.displacement;
-    HitInfo hi = HitInfo(displacedTriangleHit);
-    if (rayData.pathLength == 0) { // we hit vertex x2
-        rayData.reconnectionVertHitInfo = hi.pack();
-    }
-    handleHit(hi, rayData);
+    handleHit(HitInfo(displacedTriangleHit), rayData);
 }
 
 //
@@ -940,11 +947,7 @@ void scatterCurveClosestHit(inout ScatterRayData rayData, CurveIntersector::Attr
     curveHit.instanceID = getGeometryInstanceID();
     curveHit.primitiveIndex = PrimitiveIndex();
     curveHit.barycentrics = attribs.barycentrics;
-    HitInfo hi = HitInfo(curveHit);
-    if (rayData.pathLength == 0) { // we hit vertex x2
-        rayData.reconnectionVertHitInfo = hi.pack();
-    }
-    handleHit(hi, rayData);
+    handleHit(HitInfo(curveHit), rayData);
 }
 
 //
@@ -969,11 +972,7 @@ void scatterSdfGridClosestHit(inout ScatterRayData rayData, SDFGridHitData sdfGr
     SDFGridHit sdfGridHit;
     sdfGridHit.instanceID = getGeometryInstanceID();
     sdfGridHit.hitData = sdfGridHitData;
-    HitInfo hi = HitInfo(sdfGridHit);
-    if (rayData.pathLength == 0) { // we hit vertex x2
-        rayData.reconnectionVertHitInfo = hi.pack();
-    }
-    handleHit(hi, rayData);
+    handleHit(HitInfo(sdfGridHit), rayData);
 }
 
 //
