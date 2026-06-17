@@ -28,23 +28,23 @@ struct DebugData
 {
     uint neighborInd;
     bool shiftSucceeded;
-    
+
+    bool hitInfoInvalid;
+    bool occluded;
+
+    float3 rcPos;
+    float3 toRCVert;
     float3 bsdfcos1;
     float3 bsdfcos2;
-    float3 wo_x1x2;
-    float3 thp_num;
-    float3 thp_denom;
+    float srcG;
+    float dstG;
     float jacobian;
-    float mi;
-    float wi;
     float3 shifted_p_hat;
 
     __init() {
         shifted_p_hat = { -1, -1, -1 };
         jacobian = -1.f;
         shiftSucceeded = false;
-        mi = -1.f;
-        wi = -1.f;
     }
 };
 
@@ -89,86 +89,87 @@ bool getSpatialNeighbor(uint2 pixel, uint2 dims, uint radius, inout SampleGenera
     return true;
 }
 
-// Shifts sample X into the current pixel's domain using reconnection shift. X = sample to shift, Y = sample for current pixel.
-bool performReconnectionShift(Sample X, uint2 pixelX, uint2 pixelY, out Sample Y, out float jacobian, inout SampleGenerator sg, inout DebugData d) {
+// Shifts sample X into the current pixel's domain using reconnection shift. srcPixel = pixel to shift from, dstPixel = pixel to shift to
+bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, out Sample Y, out float jacobian, inout SampleGenerator sg, inout DebugData d) {
     uint2 dims;
     gOutputColor.GetDimensions(dims.x, dims.y);
 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
-    const float3 primaryRayDir = -gViewW[pixelY].xyz;
 
-    uint bufferIndX = pixelX.y * dims.x + pixelX.x;
+    uint srcBufferInd = srcPixel.y * dims.x + srcPixel.x;
+    uint dstBufferInd = dstPixel.y * dims.x + dstPixel.x;
 
-    const HitInfo hitX = HitInfo(gVBuffer[pixelX]);
-    const HitInfo hitY = HitInfo(gVBuffer[pixelY]);
-    if (hitX.isValid() && hitY.isValid())
+    const HitInfo srcHit = HitInfo(gVBuffer[srcPixel]);
+    const HitInfo dstHit = HitInfo(gVBuffer[dstPixel]);
+    if (srcHit.isValid() && dstHit.isValid())
     {
-        // Pixel represents a valid primary hit. Re evaluate its bsdf
+        //Both pixels were valid primary hits. Find modified thp
 
-        /*const bool isCurveHit = hit.getType() == HitType::Curve;
+        ///>> Find bsdf * cos * bsdf * cos for offset path, so you can multiply by incomingRadiance of base path.
 
         // Load shading data.
-        ShadingData sd = loadShadingData(hit, primaryRayOrigin, primaryRayDir);
-
+        ShadingData dstSD = loadShadingData(dstHit, primaryRayOrigin, -gViewW[dstPixel].xyz);
+       
         // Compute ray origin for new rays spawned from the G-buffer.
-        float3 rayOrigin;
-        if (isCurveHit)
-        {
-            // For curves, we set the new origin at the sphere center.
-            rayOrigin = sd.posW - sd.curveRadius * sd.frame.N;
-        }
-        else
-        {
-            rayOrigin = sd.computeRayOrigin();
-        }
+        float3 dstRayOrigin = dstSD.computeRayOrigin();
 
         // Create material instance at shading point.
         let lod1 = ExplicitLodTextureSampler(0.f);
-        let mi1 = gScene.materials.getMaterialInstance(sd, lod1);
+        let dstMI1 = gScene.materials.getMaterialInstance(dstSD, lod1);
 
-        RCVertex rcVertex = gResampledBuffer[bufferIndX].X.rcVertex;
-        HitInfo x2HitInfo = HitInfo(rcVertex.packedHitInfo);
-        if (!x2HitInfo.isValid()){ //TODO: should have another condition here. used to be X.thp_denom == 0 as in path ended before x2 but lk incoming radiance would be good check
+        RCVertex rcVertex = gResampledBuffer[srcBufferInd].X.rcVertex;
+        HitInfo rcHitInfo = HitInfo(rcVertex.packedHitInfo);
+        if (!rcHitInfo.isValid()) { // TODO: should have another condition here. used to be X.thp_denom == 0 as in path ended before x2 but lk incoming radiance would be good check
+            d.hitInfoInvalid = true;
             return false; // can't do shift if x2 isn't valid
         }
 
-        // Since we have a valid x2 vertex, proceed with re-eval bsdf at x1
-        float3 x2Pos = shiftMapInfo.x2;
-        float3 toX2 = x2Pos - rayOrigin; //use sd.pos - rayOrigin pattern
-        float3 wo = normalize(toX2);
-        d.wo_x1x2 = wo;
-        if (!traceShadowRay(rayOrigin, wo, length(toX2))) {
+        // Since we have a valid x2 vertex, first find geometry term for base path to use later in jacobian
+        ShadingData srcSD = loadShadingData(srcHit, primaryRayOrigin, -gViewW[srcPixel].xyz);
+        float3 srcRayOrigin = srcSD.computeRayOrigin(); //this is the place where the ray from x1 to x2 originated
+        //Find rc position
+        float3 rcPos;
+        if (rcHitInfo.getType() == HitType::Triangle) {
+            rcPos = gScene.getVertexData(rcHitInfo.getTriangleHit()).posW;
+        } else {
+            // oither types not supported for now
+            return false;
+        }
+        float3 srcX1_to_X2 = rcPos - srcRayOrigin;
+        float3 dirX1_to_X2 = normalize(srcX1_to_X2);
+        srcSD = loadShadingData(rcHitInfo, srcRayOrigin, dirX1_to_X2); // set srcSD to be shading data at x2 on the base path
+        float srcG = abs(dot(srcSD.faceN, -dirX1_to_X2)) / dot(srcX1_to_X2, srcX1_to_X2);
+        d.srcG = srcG;
+
+        //Proceed with re-eval bsdf at y1
+        float3 toRCVert = rcPos - dstRayOrigin; //use sd.pos- rayOrigin pattern
+        float3 rcIncomingDir = normalize(toRCVert);
+        d.rcPos = rcPos;
+        d.toRCVert = toRCVert;
+        if (!traceShadowRay(dstRayOrigin, rcIncomingDir, length(toRCVert))) {
+            d.occluded = true;
             return false; //this shift is not valid if x2 is occluded from y1
         }
-        float3 thp_num = mi1.eval(sd, wo, sg);
-        d.bsdfcos1 = mi1.eval(sd, wo, sg);
+        float3 new_thp = dstMI1.evalBSDF(dstSD, rcIncomingDir, rcVertex.prevSampledLobeType, sg); // THIS WILL RETURN 0 BC NOT IMPLEMENTED
+        d.bsdfcos1 = new_thp;
 
-        // Update values for x2.
-        sd = loadShadingData(x2HitInfo, rayOrigin, wo); // sd for x2;
+        // Now re-eval bsdf at x2
+        dstSD = loadShadingData(rcHitInfo, dstRayOrigin, rcIncomingDir); // sd for y2 = x2
 
-        jacobian = abs(dot(sd.faceN, -wo)) / (dot(toX2, toX2) * shiftMapInfo.gX1X2); //jacobian: ratio of cos * dist^2, for y1->x2 / x1->x2
+        d.dstG = abs(dot(dstSD.faceN, -rcIncomingDir)) / dot(toRCVert, toRCVert);
+        jacobian = abs(dot(dstSD.faceN, -rcIncomingDir)) / (dot(toRCVert, toRCVert) * srcG); //jacobian: ratio of cos * dist^2, for y1->x2 / x1->x2
 
         let lod2 = ExplicitLodTextureSampler(0.f);
-        let mi2 = gScene.materials.getMaterialInstance(sd, lod2); // mi for x2
-        wo = X.reconnection_vert_wo;
-        thp_num *= mi2.eval(sd, wo, sg); // bsdf * cos for x2
-        d.bsdfcos2 = mi2.eval(sd, wo, sg);
-        d.thp_num = thp_num;
-        d.thp_denom = X.thp_denom;
+        let mi2 = gScene.materials.getMaterialInstance(dstSD, lod2);                        // mi for y2 = x2
+        new_thp *= mi2.evalBSDF(dstSD, rcVertex.outgoingDir, rcVertex.sampledLobeType, sg); // bsdf * cos for y2
+        d.bsdfcos2 = mi2.evalBSDF(dstSD, rcVertex.outgoingDir, rcVertex.sampledLobeType, sg);
 
         // Find p_hat for shifted X
-        float epsilon = 1e-9f;
-        float3 cleaned_shifted;
-        cleaned_shifted[0] = (X.thp_denom[0] > epsilon) ? (X.p_hat_X[0] * thp_num[0] / X.thp_denom[0]) : 0.f;
-        cleaned_shifted[1] = (X.thp_denom[1] > epsilon) ? (X.p_hat_X[1] * thp_num[1] / X.thp_denom[1]) : 0.f;
-        cleaned_shifted[2] = (X.thp_denom[2] > epsilon) ? (X.p_hat_X[2] * thp_num[2] / X.thp_denom[2]) : 0.f;
+        Y.p_hat = new_thp * rcVertex.incomingRadiance;
+        // you will find shifted w_i afneter this method since we need to eval mis weight
+        Y.rcVertex = rcVertex;
 
-        Y.p_hat_X = cleaned_shifted;
-        // you will find shifted w_i after this method since we need to eval mis weight
-        Y.reconnection_vert_wo = X.reconnection_vert_wo;
-        Y.thp_denom = thp_num;
-
-        return jacobian != 0.f; //if jacobian = 0, w_i will be 0 so it'll be as if the shift failed */
+        return jacobian != 0.f; //if jacobian = 0, w_i will be 0 so it'll be as if the shift failed
     }
     return false;
 }
@@ -235,26 +236,25 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
             r.updateReservoir(shiftedNeighbor, w_i, gCandidateBuffer[neighborInd].c, sg);
         }
     }*/
-    /*Sample shifted = Sample::createNull();
+    Sample shifted = Sample::createNull();
     float jacobian = 0.f;
-    bool shiftSucceeded = performReconnectionShift(r.X, pixel, bufferInd, shifted, jacobian, sg, d);
+    bool shiftSucceeded = performReconnectionShift(pixel, pixel, shifted, jacobian, sg, d);
     d.shiftSucceeded = shiftSucceeded;
     d.jacobian = jacobian;
     d.shifted_p_hat = shifted.p_hat;
-    if (!shiftSucceeded) {
+
+    if (d.hitInfoInvalid) {
+        gOutputColor[pixel] = float4(0, 0.5, 0, 1); //short path, ok
+    } else if (d.occluded) {
         gOutputColor[pixel] = float4(1, 0, 0, 1);
-    } else if (jacobian != 1.f) {
-        gOutputColor[pixel] = float4(1, 1, 0, 1);
-    } else if (!(all(shifted.p_hat_X == r.X.p_hat_X))) {
-        gOutputColor[pixel] = float4(0, 1, 0, 1);
-    } else if (!(all(shifted.thp_denom == r.X.thp_denom))) {
-        gOutputColor[pixel] = float4(0, 0, 1, 1);
+    } else if (!shiftSucceeded) {
+        gOutputColor[pixel] = float4(1, 0, 1, 1);
     } else {
-        gOutputColor[pixel] = float4(0, 0, 0, 1);
+        gOutputColor[pixel] = float4(1, 1, 1, 1);
     }
     gResampledBuffer[bufferInd] = r;
     debugBuffer[bufferInd] = d;
-    return;*/
+    return;
 
     float3 f_X = r.X.p_hat;
     float W_X = r.W_X;

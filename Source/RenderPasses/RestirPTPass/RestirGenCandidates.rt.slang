@@ -71,7 +71,7 @@ Texture2D<float4> gViewW; // Optional
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> gReservoirBuffer;
 RWStructuredBuffer<float3> gDI_BGBuffer;
-RWStructuredBuffer<float3> debugBuffer;
+RWStructuredBuffer<DebugData> debugBuffer;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
@@ -97,17 +97,15 @@ struct DebugData {
     uint path_length_from_cam;
     bool missed;
 
-    float3 bsdf_p_hat;
-    float wi;
-
     uint curVert;
     float3 bsdf1;
     float3 bsdf2;
     float3 mi_eval1;
     float3 mi_eval2;
-    float3 wo_x1x2;
 
     __init() {
+        path_length_from_cam = 0;
+        missed = false;
         curVert = 0;
         bsdf1 = { 0.f, 0.f, 0.f };
         bsdf2 = { 0.f, 0.f, 0.f };
@@ -121,6 +119,7 @@ struct SampleData{
     float bsdf_w_i;
     float3 nee_p_hat;
     float nee_w_i;
+    float3 Li;
     uint4 rcPackedHitInfo;
     uint prevSampledLobeType;
     uint sampledLobeType;
@@ -132,6 +131,7 @@ struct SampleData{
         nee_p_hat = {0.f, 0.f, 0.f};
         nee_w_i = 0.f;
 
+        Li = { 0.f, 0.f, 0.f };
         rcPackedHitInfo = {0, 0, 0, 0};
         prevSampledLobeType = 0;
         sampledLobeType = 0;
@@ -273,7 +273,6 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         if (!isCurveHit && bsdfSample.isLobe(LobeType::Transmission))
         {
             rayData.origin = sd.computeRayOrigin(false);
-            //rayData.d.transmission = true;
         }
         rayData.direction = bsdfSample.wo;
 
@@ -292,10 +291,12 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
             // first generate scatter ray
             rayData.d.bsdf1 = bsdfSample.weight * (rayData.nonDelta ? bsdfSample.pdf : 1.f);
             rayData.d.curVert++;
+            rayData.d.mi_eval1 = mi.evalBSDF(sd, rayData.direction, bsdfSample.lobeType, rayData.sg);
         }else if(rayData.d.curVert == 1) {
             // 2nd generate
             rayData.d.bsdf2 = bsdfSample.weight * (rayData.nonDelta ? bsdfSample.pdf : 1.f);
             rayData.d.curVert++;
+            rayData.d.mi_eval2 = mi.evalBSDF(sd, rayData.direction, bsdfSample.lobeType, rayData.sg);
         }
 
         return any(rayData.p_hat_thp > 0.f);
@@ -614,7 +615,6 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayData.terminated = true;
         return;
     }
-    rayData.d.mi_eval2 = mi.eval(sd, rayData.direction, rayData.sg);
 
     rayData.pathLength++;
 }
@@ -673,7 +673,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                     if(rayData.pathLength == 0) {
                         // we are either in the first sampleNEE before traceScatterRay loop (x2 == nee vert) or in the first one called by handleHit (x3 == nee vert)
                         rayData.sampleData.x3_nee_wo = ls.dir;
-                        //dont need incomingRadiance for now
+                        rayData.sampleData.Li = ls.Li;
                         //packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
                     }
                     return true;
@@ -763,15 +763,13 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         sampleNEE(sd, mi, rayData);
         curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex); //rcvertex is invalid for this vert bc length 2 paths are invalid
         r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg);
-        //debugBuffer[bufferInd] = rayData.d;
+        debugBuffer[bufferInd] = rayData.d;
 
         // Generate scatter ray.
         if (!generateScatterRay(sd, mi, isCurveHit, rayOrigin, rayData))
             rayData.terminated = true;
 
-        rayData.d.mi_eval1 = mi.eval(sd, rayData.direction, sg);
-        rayData.d.wo_x1x2 = rayData.direction;
-
+        float3 pre_rc_thp;
         // Follow path into the scene and compute its total contribution.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene. so path length > 0 by now
         for (uint depth = 0; depth <= kMaxBounces && !rayData.terminated; depth++)
@@ -780,12 +778,14 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             if (depth != 0) {
                 if (depth == 1) {
                     // the first time this code runs it's our x3 NEESample w special case handled in rcVertex
+                    // and this time rcVertex.incomingRadiance is actually set alr
                     RCVertex neeX2 = rcVertex;
                     neeX2.outgoingDir = rayData.sampleData.x3_nee_wo;
                     neeX2.sampledLobeType = (uint)LobeType::All;
                     curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, neeX2);
                 } else {
                     curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex);
+                    curNEESample.rcVertex.incomingRadiance = curNEESample.p_hat / pre_rc_thp;
                 }
                 r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg); // since we alr updated reservoir with the first nee sample
             }
@@ -798,18 +798,20 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             // direct illumination and generates the next scatter ray.
             traceScatterRay(rayData);
             if (depth == 0) { // this is for the first indirect bounce
+                pre_rc_thp = rayData.p_hat_thp;
                 if (!rayData.terminated) {
                     // if kmaxbounces was 0 or we hit env map or scatter ray failed, would terminate here and we clear rc vertex since it'd be length 2 BSDF path
-                     //otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path. only case not covered would be an NEE length 2 path
+                    // otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path. only case not covered would be an NEE length 2 path
                     // if gen scatter ray succeeded, rayData.direction is dir from x2 to x3
                     rcVertex = RCVertex(rayData.direction, { 0.f, 0.f, 0.f }, rayData.sampleData.rcPackedHitInfo,
                         rayData.sampleData.prevSampledLobeType, rayData.sampleData.sampledLobeType);
                 }
             }
             curBSDFSample = Sample(rayData.sampleData.bsdf_p_hat, rayData.sampleData.bsdf_w_i, rcVertex);
+            curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / pre_rc_thp;
             r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg);
 
-            debugBuffer[bufferInd] = curBSDFSample.p_hat;
+            debugBuffer[bufferInd] = rayData.d;
         }
     }
     else

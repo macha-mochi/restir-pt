@@ -72,6 +72,18 @@ struct StandardMaterialInstance : MaterialInstanceBase, IMaterialInstance
         return bsdf.eval(wiLocal, woLocal, sg, BSDFContext());
     }
 
+    //Function added by me for restir
+    float3 evalBSDF<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeTypes, inout S sg) {
+        float3 wiLocal = sf.toLocal(sd.V);
+        float3 woLocal = sf.toLocal(wo);
+
+        if (!isValidHemisphereReflectionOrTransmission(sd, sf, wiLocal, woLocal, wo)) return float3(0.f);
+
+        StandardBSDF bsdf = StandardBSDF(wiLocal, sd.mtl, data);
+
+        return bsdf.evalBSDF(wiLocal, woLocal, allowedLobeTypes, sg, BSDFContext());
+    }
+
     [Differentiable]
     float3 evalAD<S : ISampleGenerator>(const DiffMaterialData diffData, const ShadingData sd, const float3 wo, inout S sg)
     {
