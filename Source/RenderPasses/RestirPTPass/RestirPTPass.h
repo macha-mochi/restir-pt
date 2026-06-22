@@ -59,8 +59,8 @@ public:
     virtual void execute(RenderContext* pRenderContext, const RenderData& renderData) override;
     virtual void renderUI(Gui::Widgets& widget) override;
     virtual void setScene(RenderContext* pRenderContext, const ref<Scene>& pScene) override;
-    virtual bool onMouseEvent(const MouseEvent& mouseEvent) override { return false; }
-    virtual bool onKeyEvent(const KeyboardEvent& keyEvent) override { return false; }
+    virtual bool onMouseEvent(const MouseEvent& mouseEvent) override;
+    virtual bool onKeyEvent(const KeyboardEvent& keyEvent) override;
 
 private:
     void parseProperties(const Properties& props);
@@ -101,9 +101,6 @@ private:
     } mTracer;
 
     //Resources
-    ref<Buffer> mpCandidateGenDebugBuffer; ///< Spare buffer for debugging purposes. TODO: remove later, or convert into ping pong
-    ref<Buffer> mpResamplingDebugBuffer;
-
     ref<Buffer> mpReservoirBuffers[2]; ///< Length 2 array containing buffers of path reservoirs
     uint mInputReservoirID; ///< these will be 0 or 1
     uint mOutputReservoirID;
@@ -113,4 +110,15 @@ private:
     //Compute passes
     //do you need one for testing candidate visibility??
     ref<ComputePass> mpSpatiotemporalResamplingPass; /// Spatiotemporal resampling.
+
+    //Debugging resources
+    ref<Buffer> mpCandidateGenDebugBuffer;
+    ref<Buffer> mpResamplingDebugBuffer;
+
+    bool mUsePathViewer; // if true, the renderer is paused so you can click around pixels on that frame
+    uint2 mMousePixelPos;
+    ref<Buffer> mpDebugPathBuffer;
+    ref<ComputePass> mpPathViewerPass;
+
+    ref<Buffer> tempBuffer;
 };

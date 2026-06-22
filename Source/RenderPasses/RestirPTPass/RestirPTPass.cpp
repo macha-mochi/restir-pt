@@ -37,8 +37,9 @@ extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registr
 
 namespace
 {
-const char kShaderFile[] = "RenderPasses/RestirPTPass/RestirGenCandidates.rt.slang";
+const char kCandidateGenShaderFile[] = "RenderPasses/RestirPTPass/RestirGenCandidates.rt.slang";
 const char kResampleComputeShaderFile[] = "RenderPasses/RestirPTPass/Resampling.cs.slang";
+const char kPathViewerShaderFile[] = "RenderPasses/RestirPTPass/PathViewer.cs.slang";
 
 //CANDIDATE GENERATION SETTINGS
 // Ray tracing settings that affect the traversal stack size.
@@ -119,6 +120,63 @@ RenderPassReflection RestirPTPass::reflect(const CompileData& compileData)
 
 void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& renderData)
 {
+    // Get dimensions of ray dispatch / compute dispatch.
+    const uint2 targetDim = renderData.getDefaultTextureDims();
+    FALCOR_ASSERT(targetDim.x > 0 && targetDim.y > 0);
+
+    auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
+    {
+        if (!desc.texname.empty())
+        {
+            var[desc.texname] = renderData.getTexture(desc.name);
+        }
+    };
+    // PATH VIEWER DEBUG COMPUTE PASS
+    // Add defines, prepare vars, set constants, and bind i/o buffers
+    // don't add new defines here bc the compute pass is already set after you created it when you set the scene
+    if (mUsePathViewer)
+    {
+        if (!mpPathViewerPass)
+        {
+            DefineList defines;
+            ProgramDesc desc;
+            desc.addShaderLibrary(kPathViewerShaderFile);
+            desc.csEntry("drawPaths");
+            mpPathViewerPass = ComputePass::create(mpDevice, desc, defines);
+        }
+
+        if (!mpDebugPathBuffer)
+        {
+            std::cout << "Path Viewer: failed, path data buffer not created" << std::endl;
+            return;
+        }
+
+        if (!mpScene)
+        {
+            std::cout << "Path Viewer: failed, scene not set so could not bind camera" << std::endl;
+            return;
+        }
+
+        auto var = mpPathViewerPass->getRootVar();
+        var["gPathDataBuffer"] = mpDebugPathBuffer;
+        var["gMousePixelPos"] = mMousePixelPos;
+        for (auto channel : kOutputChannels)
+            bind(var, channel);
+        var["gViewProjMat"] = mpScene->getCamera()->getViewProjMatrix();
+
+        uint32_t elementCount = targetDim.x * targetDim.y;
+        if (!tempBuffer || tempBuffer->getElementCount() < elementCount)
+        {
+            tempBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
+            tempBuffer->setName("Restir Temp Buffer");
+            var["debugBuffer"] = tempBuffer;
+        }
+
+        mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
+
+        return;
+    }
+
     // Update refresh flag if options that affect the output have changed.
     auto& dict = renderData.getDictionary();
     if (mOptionsChanged)
@@ -198,19 +256,9 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     }
 
     // Bind I/O buffers. These needs to be done per-frame as the buffers may change anytime.
-    auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
-       {
-           if (!desc.texname.empty())
-           {
-               var[desc.texname] = renderData.getTexture(desc.name);
-           }
-       };
     for (auto channel : kInputChannels)
         bind(var, channel);
 
-    // Get dimensions of ray dispatch.
-    const uint2 targetDim = renderData.getDefaultTextureDims();
-    FALCOR_ASSERT(targetDim.x > 0 && targetDim.y > 0);
     // Create the reservoirs buffer here if needed since that's an output of ray gen pass
     uint32_t elementCount = targetDim.x * targetDim.y;
 
@@ -238,7 +286,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     // Spawn the rays.
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
 
-    //COMPUTE PASS STUFF BELOW
+    //SPATIOTEMPORAL RESAMPLING COMPUTE PASS
     //Add defines, prepare vars, set constants, and bind i/o buffers
     //don't add new defines here bc the compute pass is already set after you created it when you set the scene
     auto program = mpSpatiotemporalResamplingPass->getProgram();
@@ -263,6 +311,12 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpResamplingDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
         mpResamplingDebugBuffer->setName("Restir Resampling Debug Buffer");
         var["debugBuffer"] = mpResamplingDebugBuffer;
+    }
+    if (!mpDebugPathBuffer || mpDebugPathBuffer->getElementCount() < elementCount)
+    {
+        mpDebugPathBuffer = mpDevice->createStructuredBuffer(var["pathDebugBuffer"], elementCount);
+        mpDebugPathBuffer->setName("Restir Debug Path Data Buffer");
+        var["pathDebugBuffer"] = mpDebugPathBuffer;
     }
     //Bind inputs and outputs to the compute pass
     for (auto channel : kInputChannels)
@@ -300,11 +354,11 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
     dirty |= widget.checkbox("Use importance sampling", mUseImportanceSampling);
     widget.tooltip("Use importance sampling for materials", true);
 
-    dirty |= widget.checkbox("Test", mUseImportanceSampling);
-    widget.tooltip("This is a test tooltip for the test checkbox", true);
-
     dirty |= widget.dropdown("Shift mapping type", mShiftMappingType);
     widget.tooltip("What type of shift mapping to use for spatial/temporal reuse.", true);
+
+    dirty |= widget.checkbox("Pause renderer and use path viewer", mUsePathViewer);
+    widget.tooltip("Whether we should pause the renderer and allow user to click a pixel to display its final path", true);
 
     // If rendering options that modify the output have changed, set flag to indicate that.
     // In execute() we will pass the flag to other passes for reset of temporal data etc.
@@ -312,6 +366,32 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
     {
         mOptionsChanged = true;
     }
+}
+
+bool RestirPTPass::onMouseEvent(const MouseEvent& mouseEvent)
+{
+    if (mouseEvent.type == MouseEvent::Type::ButtonDown)
+    {
+        float2 mousePos = (mouseEvent.pos) * float2(1920, 1080);
+        mMousePixelPos = (uint2)mousePos;
+        std::cout << mMousePixelPos.x << " " << mMousePixelPos.y << std::endl;
+
+        return true;
+    }
+    if (mUsePathViewer)
+    {
+        return true; //don't want the camera to move
+    }
+    return false;
+}
+
+bool RestirPTPass::onKeyEvent(const KeyboardEvent& keyEvent)
+{
+    if (mUsePathViewer)
+    {
+        return true; // don't want the camera to move
+    }
+    return false;
 }
 
 void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pScene)
@@ -322,6 +402,8 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mTracer.pBindingTable = nullptr;
     mTracer.pVars = nullptr;
     mFrameCount = 0;
+    mUsePathViewer = false;
+    mMousePixelPos = uint2(0, 0);
     resetLighting();
 
     //Set the scene to the new one
@@ -337,7 +419,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         // Create ray tracing program.
         ProgramDesc desc;
         desc.addShaderModules(mpScene->getShaderModules());
-        desc.addShaderLibrary(kShaderFile);
+        desc.addShaderLibrary(kCandidateGenShaderFile);
         desc.setMaxPayloadSize(kMaxPayloadSizeBytes);
         desc.setMaxAttributeSize(mpScene->getRaytracingMaxAttributeSize());
         desc.setMaxTraceRecursionDepth(kMaxRecursionDepth);
@@ -388,13 +470,17 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
 
         // Create the resampling compute passes here since we needed mpScene
         // Helper for creating compute passes.
-        auto createComputePass = [&](const std::string& file, const std::string& entryPoint)
+        auto createComputePass = [&](const std::string& file, const std::string& entryPoint,
+                                     const std::vector<std::pair<std::string, std::string>>& customDefines = {})
         {
             DefineList defines;
             mpScene->getShaderDefines(defines);
             
             defines.add(mpSampleGenerator->getDefines());
-            defines.add("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
+            for (std::pair<std::string, std::string> def : customDefines)
+            {
+                defines.add(def.first, def.second);
+            }
 
             ProgramDesc desc;
             mpScene->getShaderModules(desc.shaderModules);
@@ -404,7 +490,10 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
             ref<ComputePass> pPass = ComputePass::create(mpDevice, desc, defines);
             return pPass;
         };
-        mpSpatiotemporalResamplingPass = createComputePass(kResampleComputeShaderFile, "spatiotemporalResampling");
+        mpSpatiotemporalResamplingPass = createComputePass(
+            kResampleComputeShaderFile, "spatiotemporalResampling",
+            {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)}}
+        );
     }
 }
 void RestirPTPass::resetLighting()

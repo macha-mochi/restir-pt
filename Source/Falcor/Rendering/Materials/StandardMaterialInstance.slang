@@ -73,7 +73,7 @@ struct StandardMaterialInstance : MaterialInstanceBase, IMaterialInstance
     }
 
     //Function added by me for restir
-    float3 evalBSDF<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeTypes, inout S sg) {
+    float3 evalBSDF<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeType, inout S sg) {
         float3 wiLocal = sf.toLocal(sd.V);
         float3 woLocal = sf.toLocal(wo);
 
@@ -81,7 +81,10 @@ struct StandardMaterialInstance : MaterialInstanceBase, IMaterialInstance
 
         StandardBSDF bsdf = StandardBSDF(wiLocal, sd.mtl, data);
 
-        return bsdf.evalBSDF(wiLocal, woLocal, allowedLobeTypes, sg, BSDFContext());
+        if (allowedLobeType == (uint)LobeType::All) { //special case: evalBSDF only works on ONE sampled lobe type
+            return bsdf.eval(wiLocal, woLocal, sg, BSDFContext());
+        }
+        return bsdf.evalBSDF(wiLocal, woLocal, allowedLobeType, sg, BSDFContext());
     }
 
     [Differentiable]

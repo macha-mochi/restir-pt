@@ -7,6 +7,7 @@ target_sources(RestirPTPass PRIVATE
     RestirTypes.slangh
     RestirReservoir.slang
     Resampling.cs.slang
+    PathViewer.cs.slang
 )
 
 target_copy_shaders(RestirPTPass RenderPasses/RestirPTPass)

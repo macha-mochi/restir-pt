@@ -66,49 +66,25 @@ struct LightSample
     float g = 0; ///< Geometry term for the light sample, only valid if the light sample is from an emissive triangle
 };
 
-/** Describes a path vertex.
- */
-struct PathVertex
+/**
+ Describes a Path as a sequence of vertices, used by the PathViewer
+*/
+struct Path
 {
-    uint index;        ///< Vertex index (0 = camera, 1 = primary hit, 2 = secondary hit, etc.).
-    float3 pos;        ///< Vertex position.
-    float3 faceNormal; ///< Geometry normal at the vertex (zero if not on a surface).
-    bool frontFacing;  ///< True if path vertex is on the front-facing side (if on a surface).
+    uint length; // the same as the index of the last vertex on this path
+    uint rcIndex; // ex for reconnection shift this will be 2
+    float3 vertices[5]; // starts at x1, then x2, x3, etc since camera pos is determined
 
-    #ifndef HOST_CODE //this excludes functions that change the state of the struct from being seen by c++ compiler
-
-    /** Initializes a path vertex.
-        \param[in] index Vertex index.
-        \param[in] pos Vertex position.
-        \param[in] faceNormal Geometry normal.
-        \param[in] frontFacing Front-facing flag.
-    */
-    __init(uint index, float3 pos, float3 faceNormal = float3(0.f), bool frontFacing = true)
-    {
-        this.index = index;
-        this.pos = pos;
-        this.faceNormal = faceNormal;
-        this.frontFacing = frontFacing;
-    }
-    static PathVertex NULL = { -1, float3(0.f), float3(0.f), false };
-
-    /** Get position with offset applied in direction of the geometry normal to avoid self-intersection
-        for visibility rays.
-        \param[in] rayDir Direction of the visibility ray (does not need to be normalized).
-        \return Returns the offseted position.
-    */
-    float3 getRayOrigin(float3 rayDir)
-    {
-        return computeRayOrigin(pos, dot(faceNormal, rayDir) >= 0 ? faceNormal : -faceNormal);
+    #ifndef HOST_CODE
+    
+    __init(uint len, uint rci){
+        length = len;
+        rcIndex = rci;
+        for(int i = 0; i < 5; i++){
+            vertices[i] = float3(0.f);
+        }
     }
 
-    /** Returns the oriented face normal.
-        \return Face normal flipped to the same side as the view vector.
-    */
-    float3 getOrientedFaceNormal()
-    {
-        return frontFacing ? faceNormal : -faceNormal;
-    }
     #endif
 };
 

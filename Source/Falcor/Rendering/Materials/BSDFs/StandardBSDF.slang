@@ -239,10 +239,11 @@ struct StandardBSDF : IBSDF, IDifferentiable
         return result;
     }
 
+    //unsafe, could return NaN if currentLobePdf is 0. For restir we want the output to also be 0 in this case, this will be handled by the caller
     float3 evalBSDF<S : ISampleGenerator>(const float3 wi, const float3 wo, const uint allowedLobeTypes, inout S sg, BSDFContext bc)
     {
         float3 otherLobePdfs = float3(0.f);
-        float3 curLobePdf = float3(0.f);
+        float curLobePdf = 0.f;
         //Commented out lines are always 0, so no need to compute them
         //This function assumes that allowedLobeTypes is only one lobe type since sample() for this BSDF only samples 1 lobe type
 
@@ -255,7 +256,7 @@ struct StandardBSDF : IBSDF, IDifferentiable
             if (pSpecularTransmission > 0.f)
                 otherLobePdfs += pSpecularTransmission * specularTransmission.evalPdf(wi, wo, bc);
 
-            return (1.f - specTrans) * (1.f - diffTrans) * diffuseReflection.eval(wi, wo, sg, bc) * (float3(1.f) + otherLobePdfs / curLobePdf);
+            return (1.f - specTrans) * (1.f - diffTrans) * diffuseReflection.eval(wi, wo, sg, bc) * (1.f + otherLobePdfs / curLobePdf);
         }
         if (pDiffuseTransmission > 0.f && (allowedLobeTypes & LobeType::DiffuseTransmission) != 0) {
             curLobePdf = pDiffuseTransmission * diffuseTransmission.evalPdf(wi, wo, bc);
@@ -265,10 +266,10 @@ struct StandardBSDF : IBSDF, IDifferentiable
             if (pSpecularTransmission > 0.f)
                 otherLobePdfs += pSpecularTransmission * specularTransmission.evalPdf(wi, wo, bc);
 
-            return (1.f - specTrans) * diffTrans * diffuseTransmission.eval(wi, wo, sg, bc) * (float3(1.f) + otherLobePdfs / curLobePdf);
+            return (1.f - specTrans) * diffTrans * diffuseTransmission.eval(wi, wo, sg, bc) * (1.f + otherLobePdfs / curLobePdf);
         }
         if (pSpecularReflection > 0.f && (allowedLobeTypes & LobeType::SpecularReflection) != 0) {
-            curLobePdf = pSpecularReflection * specularReflection.evalPdf(wi, wo, bc); //TODO: what if this is 0?
+            curLobePdf = pSpecularReflection * specularReflection.evalPdf(wi, wo, bc); // TODO: what if this is 0?
 
             if (pDiffuseReflection > 0.f)
                 otherLobePdfs += pDiffuseReflection * diffuseReflection.evalPdf(wi, wo, bc);
@@ -276,7 +277,7 @@ struct StandardBSDF : IBSDF, IDifferentiable
             if (pSpecularTransmission > 0.f)
                 otherLobePdfs += pSpecularTransmission * specularTransmission.evalPdf(wi, wo, bc);
 
-            return (1.f - specTrans) * specularReflection.eval(wi, wo, sg, bc) * (float3(1.f) + otherLobePdfs / curLobePdf);
+            return (1.f - specTrans) * specularReflection.eval(wi, wo, sg, bc) * (1.f + otherLobePdfs / curLobePdf);
         }
         if (pSpecularTransmission > 0.f && (allowedLobeTypes & LobeType::SpecularTransmission) != 0) {
             curLobePdf = pSpecularTransmission * specularTransmission.evalPdf(wi, wo, bc); //TODO: waht if this is 0?
@@ -288,7 +289,7 @@ struct StandardBSDF : IBSDF, IDifferentiable
             if (pSpecularReflection > 0.f)
                 otherLobePdfs += pSpecularReflection * specularReflection.evalPdf(wi, wo, bc);
 
-            return specTrans * specularTransmission.eval(wi, wo, sg, bc) * (float3(1.f) + otherLobePdfs / curLobePdf);
+            return specTrans * specularTransmission.eval(wi, wo, sg, bc) * (1.f + otherLobePdfs / curLobePdf);
         }
         return float3(0.f);
     }

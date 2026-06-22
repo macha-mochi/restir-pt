@@ -71,6 +71,8 @@ Texture2D<float4> gViewW; // Optional
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> gReservoirBuffer;
 RWStructuredBuffer<float3> gDI_BGBuffer;
+
+//Debug buffers
 RWStructuredBuffer<DebugData> debugBuffer;
 
 // Static configuration based on defines set from the host.
@@ -98,6 +100,7 @@ struct DebugData {
     bool missed;
 
     uint curVert;
+    float3 x3_nee_mieval;
     float3 bsdf1;
     float3 bsdf2;
     float3 mi_eval1;
@@ -182,6 +185,49 @@ struct ScatterRayData
         this.sampleData = {};
 
         this.d = {};
+    }
+};
+
+/** Describes a path vertex.
+ */
+struct PathVertex
+{
+    uint index;        ///< Vertex index (0 = camera, 1 = primary hit, 2 = secondary hit, etc.).
+    float3 pos;        ///< Vertex position.
+    float3 faceNormal; ///< Geometry normal at the vertex (zero if not on a surface).
+    bool frontFacing;  ///< True if path vertex is on the front-facing side (if on a surface).
+
+    /** Initializes a path vertex.
+        \param[in] index Vertex index.
+        \param[in] pos Vertex position.
+        \param[in] faceNormal Geometry normal.
+        \param[in] frontFacing Front-facing flag.
+    */
+    __init(uint index, float3 pos, float3 faceNormal = float3(0.f), bool frontFacing = true)
+    {
+        this.index = index;
+        this.pos = pos;
+        this.faceNormal = faceNormal;
+        this.frontFacing = frontFacing;
+    }
+    static PathVertex NULL = { -1, float3(0.f), float3(0.f), false };
+
+    /** Get position with offset applied in direction of the geometry normal to avoid self-intersection
+        for visibility rays.
+        \param[in] rayDir Direction of the visibility ray (does not need to be normalized).
+        \return Returns the offseted position.
+    */
+    float3 getRayOrigin(float3 rayDir)
+    {
+        return computeRayOrigin(pos, dot(faceNormal, rayDir) >= 0 ? faceNormal : -faceNormal);
+    }
+
+    /** Returns the oriented face normal.
+        \return Face normal flipped to the same side as the view vector.
+    */
+    float3 getOrientedFaceNormal()
+    {
+        return frontFacing ? faceNormal : -faceNormal;
     }
 };
 
@@ -651,7 +697,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                 misWeight = evalMIS(1, ls.pdf, 1, scatterPdf);
             }
 
-            float3 weight = mi.eval(sd, ls.dir, rayData.sg); //f * cos
+            float3 weight = mi.eval(sd, ls.dir, rayData.sg); // f * cos
             float3 Lr = weight * ls.Li;
             if (any(Lr > 0.f))
             {
@@ -673,7 +719,8 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                     if(rayData.pathLength == 0) {
                         // we are either in the first sampleNEE before traceScatterRay loop (x2 == nee vert) or in the first one called by handleHit (x3 == nee vert)
                         rayData.sampleData.x3_nee_wo = ls.dir;
-                        rayData.sampleData.Li = ls.Li;
+                        rayData.sampleData.Li = ls.Li * ls.pdf; //bc Li was predivided by pdf
+                        rayData.d.x3_nee_mieval = weight;
                         //packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
                     }
                     return true;
@@ -780,6 +827,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     // the first time this code runs it's our x3 NEESample w special case handled in rcVertex
                     // and this time rcVertex.incomingRadiance is actually set alr
                     RCVertex neeX2 = rcVertex;
+                    neeX2.incomingRadiance = rayData.sampleData.Li;
                     neeX2.outgoingDir = rayData.sampleData.x3_nee_wo;
                     neeX2.sampledLobeType = (uint)LobeType::All;
                     curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, neeX2);
