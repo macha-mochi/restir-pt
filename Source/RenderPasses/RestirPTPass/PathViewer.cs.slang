@@ -27,17 +27,20 @@ struct DebugData {
 /**
  converts posW to a uint2 in pixel coordinates. [0, 0] is top left, (1920, 1080) is bottom right.
  this only converts to within 1 pixel of precision, do not use if you need pixel perfect :(
+
+ dimensions outside of [1920, 1080] theoretically allowed, like if posW is not in the view of the camera
 */
-uint2 worldToScreen(float3 posW, uint2 dims) {
+int2 worldToScreen(float3 posW, uint2 dims) {
     float4 clipSpace = mul(gViewProjMat, float4(posW, 1.f));
-    float3 ndc = clipSpace.xyz / clipSpace.w; // in range [-1, 1]
+    float3 ndc = clipSpace.xyz / clipSpace.w; // in range [-1, 1] if on screen
     float2 coord = float2((ndc.x + 1) / 2, (1 - ndc.y) / 2) * float2(dims);
-    return (uint2)coord;
+    return (int2)coord;
 }
 
 // Finds the distance from a pixel pos on the screen to a line segment stretching between two pixel space positions.
 // If there was a line between v0 and v1 and it extended infinitely, and the closest point to pos on that line was not between v0 and v1,
 // then return arbitrary large value.
+// Allows negative values for v0, v1.
 float distanceToSegment(int2 pos, int2 v0, int2 v1) {
     // find standard form of the line segment, Ax + By + C = 0. p0 and p1 are both points on this line segment
 
@@ -76,9 +79,7 @@ void drawPaths(uint3 threadID: SV_DispatchThreadID) {
         uint2 p1 = worldToScreen(gPathDataBuffer[mouseBufferInd].vertices[i + 1], dims);
         float dist = distanceToSegment(pixel, p0, p1);
 
-        if (dist < lineWidth) //distanceToSegment(gMousePixelPos,
-                            //worldToScreen(gPathDataBuffer[mouseBufferInd].vertices[i], dims),
-                            //worldToScreen(gPathDataBuffer[mouseBufferInd].vertices[i+1], dims)) < lineWidth)
+        if (dist < lineWidth)
         {
             if (i + 1 < gPathDataBuffer[mouseBufferInd].rcIndex) //pre reconnection
             {

@@ -73,7 +73,7 @@ struct Path
 {
     uint length; // the same as the index of the last vertex on this path
     uint rcIndex; // ex for reconnection shift this will be 2
-    float3 vertices[5]; // starts at x1, then x2, x3, etc since camera pos is determined
+    float3 vertices[5]; // starts at x1, then x2, x3, etc since camera pos is determined. these are the ray origins NOT sd.posW
 
     #ifndef HOST_CODE
     

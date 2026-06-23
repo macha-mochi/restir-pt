@@ -23,13 +23,17 @@ struct Sample {
         this.w_i = w_i;
         this.rcVertex = rcv;
     }
+
+    static bool isNull(Sample X) {
+        return all(X.p_hat == 0.f) || X.w_i == 0.f;
+    }
 };
 struct Reservoir
 {
     // info needed for reservoir: the sample X, its weight W, the sum of weights W_sum, and the sample count M (capped)
     Sample X = Sample::createNull(); // the current sample
 
-    float W_X = 0;                              // unbiased contribution weight of sample X
+    float W_X = 1.f;                              // unbiased contribution weight of sample X
     float w_sum = 0; //sum of all lowercase w seen so far, for use in resampling
     uint c = 0; //cap at 20
 
@@ -51,10 +55,6 @@ struct Reservoir
         return updateSample;
     }
 };
-bool operator ==(const Sample s1, const Sample s2) {
-    vector<bool, 3> b = s1.p_hat == s2.p_hat;
-    return b[0] && b[1] && b[2] && s1.w_i == s2.w_i;
-}
 float luminance(float3 vec) {
     return dot(vec, float3(0.2126, 0.7152, 0.0722));
 }

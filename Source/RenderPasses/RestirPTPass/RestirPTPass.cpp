@@ -282,6 +282,12 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpDiBgBuffer->setName("Restir DI_BG_Buffer");
         var["gDI_BGBuffer"] = mpDiBgBuffer;
     }
+    if (!mpDebugPathBuffer || mpDebugPathBuffer->getElementCount() < elementCount)
+    {
+        mpDebugPathBuffer = mpDevice->createStructuredBuffer(var["gPathDebugBuffer"], elementCount);
+        mpDebugPathBuffer->setName("Restir Debug Path Data Buffer");
+        var["gPathDebugBuffer"] = mpDebugPathBuffer;
+    }
 
     // Spawn the rays.
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
@@ -312,12 +318,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpResamplingDebugBuffer->setName("Restir Resampling Debug Buffer");
         var["debugBuffer"] = mpResamplingDebugBuffer;
     }
-    if (!mpDebugPathBuffer || mpDebugPathBuffer->getElementCount() < elementCount)
-    {
-        mpDebugPathBuffer = mpDevice->createStructuredBuffer(var["pathDebugBuffer"], elementCount);
-        mpDebugPathBuffer->setName("Restir Debug Path Data Buffer");
-        var["pathDebugBuffer"] = mpDebugPathBuffer;
-    }
+    var["gPathDebugBuffer"] = mpDebugPathBuffer;
     //Bind inputs and outputs to the compute pass
     for (auto channel : kInputChannels)
     {

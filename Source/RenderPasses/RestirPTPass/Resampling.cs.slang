@@ -17,10 +17,12 @@ RWStructuredBuffer<Reservoir> gResampledBuffer;
 RWStructuredBuffer<float3> gDI_BGBuffer; // direct illumination / env map bg buffer, to be added to f_X * W_X at the end
 // Outputs
 RWTexture2D<float4> gOutputColor;
-RWStructuredBuffer<DebugData> debugBuffer;
-RWStructuredBuffer<Path> pathDebugBuffer;
 
-static const uint kNumSpatialNeighbors = 1;
+//Debug
+RWStructuredBuffer<DebugData> debugBuffer;
+RWStructuredBuffer<Path> gPathDebugBuffer;
+
+static const uint kNumSpatialNeighbors = 3;
 static const uint kSpatialNeighborRadius = 20;
 static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
 
@@ -29,24 +31,7 @@ struct DebugData
     uint neighborInd;
     bool shiftSucceeded;
 
-    bool hitInfoInvalid;
-
-    float3 orig_p_hat;
-    float3 shifted_p_hat;
-    float3 bsdfcos1;
-    float3 bsdfcos2;
-    float srcG;
-    float dstG;
-    float jacobian;
-    float misWeight;
-    float w_i;
-    float3 x1;
-    float3 rcPos;
-    float3 toRCVert;
-
     __init() {
-        shifted_p_hat = { -1, -1, -1 };
-        jacobian = -1.f;
         shiftSucceeded = false;
     }
 };
@@ -100,7 +85,7 @@ bool getSpatialNeighbor(uint2 pixel, uint2 dims, uint radius, inout SampleGenera
 }
 
 // Shifts sample X into the current pixel's domain using reconnection shift. srcPixel = pixel to shift from, dstPixel = pixel to shift to
-bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, out Sample Y, out float jacobian, inout SampleGenerator sg, inout DebugData d) {
+bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, in Sample X, out Sample Y, out float jacobian, inout SampleGenerator sg, inout DebugData d) {
     uint2 dims;
     gOutputColor.GetDimensions(dims.x, dims.y);
 
@@ -118,7 +103,6 @@ bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, out Sample Y, out 
 
         // Load shading data.
         ShadingData dstSD = loadShadingData(dstHit, primaryRayOrigin, -gViewW[dstPixel].xyz);
-        d.x1 = dstSD.posW;
        
         // Compute ray origin for new rays spawned from the G-buffer.
         float3 dstRayOrigin = dstSD.computeRayOrigin();
@@ -127,10 +111,9 @@ bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, out Sample Y, out 
         let lod1 = ExplicitLodTextureSampler(0.f);
         let dstMI1 = gScene.materials.getMaterialInstance(dstSD, lod1);
 
-        RCVertex rcVertex = gCandidateBuffer[srcBufferInd].X.rcVertex;
+        RCVertex rcVertex = X.rcVertex; //gCandidateBuffer[srcBufferInd].X.rcVertex;
         HitInfo rcHitInfo = HitInfo(rcVertex.packedHitInfo);
         if (!rcHitInfo.isValid()) { // TODO: should have another condition here. used to be X.thp_denom == 0 as in path ended before x2 but lk incoming radiance would be good check
-            d.hitInfoInvalid = true;
             return false; // can't do shift if x2 isn't valid
         }
 
@@ -149,13 +132,10 @@ bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, out Sample Y, out 
         float3 dirX1_to_X2 = normalize(srcX1_to_X2);
         srcSD = loadShadingData(rcHitInfo, srcRayOrigin, dirX1_to_X2); // set srcSD to be shading data at x2 on the base path
         float srcG = abs(dot(srcSD.faceN, -dirX1_to_X2)) / dot(srcX1_to_X2, srcX1_to_X2);
-        d.srcG = srcG;
 
         //Proceed with re-eval bsdf at y1
         float3 toRCVert = rcPos - dstRayOrigin; //use sd.pos- rayOrigin pattern
         float3 rcIncomingDir = normalize(toRCVert);
-        d.rcPos = rcPos;
-        d.toRCVert = toRCVert;
         float3 hitPos = float3(0.f);
         float epsilon = 1e-5f; //shorten shadow ray distance to avoid reporting rcPos as intersection
         if (!traceShadowRay(dstRayOrigin, rcIncomingDir, length(toRCVert) - epsilon)) {
@@ -163,12 +143,10 @@ bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, out Sample Y, out 
         }
         float3 new_thp = dstMI1.evalBSDF(dstSD, rcIncomingDir, rcVertex.prevSampledLobeType, sg);
         if (any(isnan(new_thp))) new_thp = float3(0, 0, 0);
-        d.bsdfcos1 = new_thp;
 
         // Now re-eval bsdf at x2
         dstSD = loadShadingData(rcHitInfo, dstRayOrigin, rcIncomingDir); // sd for y2 = x2
 
-        d.dstG = abs(dot(dstSD.faceN, -rcIncomingDir)) / dot(toRCVert, toRCVert);
         jacobian = abs(dot(dstSD.faceN, -rcIncomingDir)) / (dot(toRCVert, toRCVert) * srcG); //jacobian: ratio of cos * dist^2, for y1->x2 / x1->x2
 
         let lod2 = ExplicitLodTextureSampler(0.f);
@@ -176,14 +154,13 @@ bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, out Sample Y, out 
         float3 weight2 = mi2.evalBSDF(dstSD, rcVertex.outgoingDir, rcVertex.sampledLobeType, sg); // bsdf * cos for y2
         if (any(isnan(weight2))) weight2 = float3(0, 0, 0);
         new_thp *= weight2;
-        d.bsdfcos2 = weight2;
 
         // Find p_hat for shifted X
         Y.p_hat = new_thp * rcVertex.incomingRadiance;
         // you will find shifted w_i afneter this method since we need to eval mis weight
         Y.rcVertex = rcVertex;
 
-        return jacobian != 0.f; //if jacobian = 0, w_i will be 0 so it'll be as if the shift failed
+        return jacobian != 0.f && luminance(Y.p_hat) != 0.f; //if jacobian = 0, or p hat is 0, w_i will be 0 so it'll be as if the shift failed
     }
     return false;
 }
@@ -200,7 +177,7 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     if (any(pixel >= dims)) return; // return if oob
 
     uint bufferInd = pixel.y * dims.x + pixel.x;
-    Reservoir r = gCandidateBuffer[bufferInd];
+    Reservoir r;
 
     SampleGenerator sg = SampleGenerator(pixel, gFrameCount);
     // Advance the generator to the first available dimension.
@@ -208,25 +185,57 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     for (uint i = 0; i < gPRNGDimension; i++)
         sampleNext1D(sg);
 
-    // temporal
-
-    // spatial
-    int2 neighbor;
     DebugData d = {};
+
+    // Prep spatial domain data
+    bool validSpatialNeighbor[kNumSpatialNeighbors] = bool[kNumSpatialNeighbors](false);
+    int2 spatialNeighbors[kNumSpatialNeighbors] = int2[kNumSpatialNeighbors](-1, -1);
+    int2 neighbor;
     for (int i = 0; i < kNumSpatialNeighbors; i++) {
         if (getSpatialNeighbor(pixel, dims, kSpatialNeighborRadius, sg, neighbor)) {
-            d.orig_p_hat = r.X.p_hat;
+            spatialNeighbors[i] = neighbor;
+        }
+    }
 
+    // New candidate generated this frame
+    float m_num = gCandidateBuffer[bufferInd].c * luminance(gCandidateBuffer[bufferInd].X.p_hat); // alr in the correct domain
+    float m_den = m_num;
+    for (int i = 0; i < kNumSpatialNeighbors; i++) {
+        if (validSpatialNeighbor[i]) {
+            uint neighborInd = spatialNeighbors[i].y * dims.x + spatialNeighbors[i].x;
+            Sample Y_neighborDomain = Sample::createNull();
+            float jacobian = 0.f;
+            // shift Y into others' domain
+            bool success = false;
+            if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
+            {
+                success = performReconnectionShift(pixel, spatialNeighbors[i], gCandidateBuffer[bufferInd].X, Y_neighborDomain, jacobian, sg, d);
+            } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
+
+            }
+            if (success) {
+                m_den += gCandidateBuffer[bufferInd].c * luminance(Y_neighborDomain.p_hat) * jacobian; // we just did the inverse shift mapping, jacobian = |T(-1)(y)|
+            }
+        }
+    }
+    float w_i = (m_num == 0.f || m_den == 0.f) ? 0.f : (m_num / m_den) * luminance(gCandidateBuffer[bufferInd].X.p_hat) * gCandidateBuffer[bufferInd].W_X; // jacobian is 1
+    r.updateReservoir(gCandidateBuffer[bufferInd].X, w_i, gCandidateBuffer[bufferInd].c, sg);
+
+    // Temporal
+
+    // Spatial
+    for (int i = 0; i < kNumSpatialNeighbors; i++) {
+        if (validSpatialNeighbor[i]) {
             uint neighborInd = neighbor.y * dims.x + neighbor.x;
             d.neighborInd = neighborInd;
-            Sample preshiftNeighbor = gCandidateBuffer[neighborInd].X;
-            Sample shiftedNeighbor = Sample::createNull();
+
+            Sample neighbor_curDomain = Sample::createNull();
             float w_i = 0.f;
-            float jacobian = 0.f; // jacobian of shifting X into Y's domain
+            float jacobian = 0.f; // jacobian of shifting X into [pixel]'s domain, |T(X)|
             bool shiftSucceeded = false;
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
             {
-                shiftSucceeded = performReconnectionShift(neighbor, pixel, shiftedNeighbor, jacobian, sg, d);
+                shiftSucceeded = performReconnectionShift(neighbor, pixel, gCandidateBuffer[neighborInd].X, neighbor_curDomain, jacobian, sg, d);
             } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
             {
                 // do hybrid mapping
@@ -234,80 +243,48 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
             d.shiftSucceeded = shiftSucceeded;
 
             if (shiftSucceeded) {
-                // evaluate resampling mis weight
-                d.jacobian = jacobian;
-                float p_from_i_y = luminance(preshiftNeighbor.p_hat) / jacobian; // i is the domain that [preshiftNeigbor] came from
-                float p_from_j_y = luminance(r.X.p_hat); // j is the domain of the current pixel so we use identity shift, jacobian = 1
-                float mi = genBalanceHeuristic(gCandidateBuffer[neighborInd].c, p_from_i_y, r.c, p_from_j_y);
+                float m_num = gCandidateBuffer[neighborInd].c * luminance(gCandidateBuffer[neighborInd].X.p_hat) / jacobian; // i is the domain that [preshiftNeighbor] came from
+                float m_den = m_num;
+                // process new candidate for m_den
+                m_den += gCandidateBuffer[bufferInd].c * luminance(gCandidateBuffer[bufferInd].X.p_hat); //jacobian is 1 since it came from this domain
+                // process other spatial ones
+                Sample shifted = Sample::createNull();
+                float j_inverse = 0.f; // jacobian of shifting samples into this spatial neighbor's domain, |T(-1)(y)|
+                bool success = false;
+                for (int j = 0; j < kNumSpatialNeighbors; j++) {
+                    if (j != i && validSpatialNeighbor[j]) {
+                        uint nInd = spatialNeighbors[j].y * dims.x + spatialNeighbors[j].x;
+                        success = performReconnectionShift(pixel, spatialNeighbors[j], neighbor_curDomain, shifted, jacobian, sg, d);
+                        if (success) {
+                            m_den += gCandidateBuffer[nInd].c * luminance(shifted.p_hat) * j_inverse;
+                        }
+                    }
+                }
 
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
-                w_i = mi * luminance(shiftedNeighbor.p_hat) * r.W_X * jacobian;
-                d.misWeight = mi;
-                d.w_i = w_i;
-
-                d.shifted_p_hat = shiftedNeighbor.p_hat;
+                w_i = (m_num / m_den) * luminance(neighbor_curDomain.p_hat) * gCandidateBuffer[neighborInd].W_X * jacobian;
             }
             // update reservoir streaming (in new buffer)
-            shiftedNeighbor.w_i = w_i;
-            r.updateReservoir(shiftedNeighbor, w_i, gCandidateBuffer[neighborInd].c, sg);
-        }
-    }
-    /*Sample shifted = Sample::createNull();
-    float jacobian = 0.f;
-    bool shiftSucceeded = performReconnectionShift(pixel, pixel, shifted, jacobian, sg, d);
-    d.shiftSucceeded = shiftSucceeded;
-    d.jacobian = jacobian;
-    d.shifted_p_hat = shifted.p_hat;
-    d.orig_p_hat = r.X.p_hat;
-    if (d.hitInfoInvalid) {
-        gOutputColor[pixel] = float4(0.2, 0.7, 0.3, 1); //short path, ok
-    } else if (any(abs(r.X.p_hat - shifted.p_hat) > 1e-6f)) {
-        if((r.X.rcVertex.sampledLobeType & (uint)LobeType::Diffuse) != 0 && (r.X.rcVertex.prevSampledLobeType & (uint)LobeType::Diffuse) != 0){
-            gOutputColor[pixel] = float4(1, 0, 1, 1); //nee counted in here
-        } else {
-            if (all(shifted.p_hat == float3(0.f))) {
-                if ((r.X.rcVertex.sampledLobeType & (uint)LobeType::Delta) == 0 && (r.X.rcVertex.prevSampledLobeType & (uint)LobeType::Delta) == 0){
-                    // you would expect that at least one is delta if its 0 so if this triggers its bad (red)
-                    gOutputColor[pixel] = float4(1, 0, 0, 1);
-                } else {
-                    gOutputColor[pixel] = float4(0, 0, 1, 1);
-                }
-            } else {
-                if ((r.X.rcVertex.sampledLobeType & (uint)LobeType::Specular) == 0 && (r.X.rcVertex.prevSampledLobeType & (uint)LobeType::Specular) == 0) {
-                    // you would expect that at least one is specular so if this triggers its bad (red)
-                    gOutputColor[pixel] = float4(1, 0, 0, 1);
-                } else {
-                    gOutputColor[pixel] = float4(1, 0, 1, 1);
-                }
+            neighbor_curDomain.w_i = w_i;
+            r.updateReservoir(neighbor_curDomain, w_i, gCandidateBuffer[neighborInd].c, sg);
+            if (isnan(r.W_X)) {
+                gOutputColor[pixel] = float4(0, 1, 0, 1);
+                return;
             }
         }
-    } else if (!shiftSucceeded) {
-        gOutputColor[pixel] = float4(1, 0, 1, 1);
-    } else {
-        gOutputColor[pixel] = float4(1, 1, 1, 1);
-    }*/
+    }
+
     gResampledBuffer[bufferInd] = r;
     debugBuffer[bufferInd] = d;
-    if (d.shiftSucceeded) {
-        Path path = Path(2, 2);
-        path.vertices[0] = d.x1;
-        path.vertices[1] = d.rcPos;
-        pathDebugBuffer[bufferInd] = path;
-    } else {
-        pathDebugBuffer[bufferInd] = Path(1, 0);
-        pathDebugBuffer[bufferInd].vertices[0] = d.x1;
-    }
-    
+    gPathDebugBuffer[bufferInd].rcIndex = 2;
 
     float3 f_X = r.X.p_hat;
     float W_X = r.W_X;
     float3 di_bg = gDI_BGBuffer[bufferInd];
-    gOutputColor[pixel] = float4(f_X * W_X + di_bg, 1.f);
-    if (d.shiftSucceeded && abs(d.jacobian - 1.f) > 0.5f) {
-        //gOutputColor[pixel] = float4(1, 0, 1, 1);
-    } else if (d.shiftSucceeded && any(d.shifted_p_hat / d.orig_p_hat > 10.f)) {
-        //gOutputColor[pixel] = float4(0, 1, 1, 1);
+    if (isnan(W_X)) {
+        //gOutputColor[pixel] = float4(0, 0, 1, 1);
     } else {
         //gOutputColor[pixel] = float4(0, 0, 0, 1);
     }
+    gOutputColor[pixel] = float4(gCandidateBuffer[bufferInd].X.p_hat * gCandidateBuffer[bufferInd].W_X + di_bg, 1.f);
 }

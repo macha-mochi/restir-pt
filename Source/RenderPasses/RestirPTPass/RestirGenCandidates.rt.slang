@@ -74,6 +74,7 @@ RWStructuredBuffer<float3> gDI_BGBuffer;
 
 //Debug buffers
 RWStructuredBuffer<DebugData> debugBuffer;
+RWStructuredBuffer<Path> gPathDebugBuffer;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
@@ -805,6 +806,10 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         Sample curNEESample = Sample::createNull();
         RCVertex rcVertex = {};
 
+        //Create debug path data
+        Path debugPath = Path(1, 0); //we can set rc index later in resampling.cs
+        debugPath.vertices[0] = rayOrigin;
+
         // do nee for first bounce bc when that scatter ray gets traced we (might) need NEESample to represent the length 2 paths
         // this must be done before the thp changes in generateScatterRay
         sampleNEE(sd, mi, rayData);
@@ -822,7 +827,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         for (uint depth = 0; depth <= kMaxBounces && !rayData.terminated; depth++)
         {
             // Update NEE things
-            if (depth != 0) {
+            if (depth != 0) { // since we alr updated reservoir with the first nee sample
                 if (depth == 1) {
                     // the first time this code runs it's our x3 NEESample w special case handled in rcVertex
                     // and this time rcVertex.incomingRadiance is actually set alr
@@ -835,12 +840,13 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex);
                     curNEESample.rcVertex.incomingRadiance = curNEESample.p_hat / pre_rc_thp;
                 }
-                r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg); // since we alr updated reservoir with the first nee sample
+                if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
+                    rayData.d.path_length_from_cam = rayData.pathLength + 2;
+                    debugPath.length = depth + 1; //technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
+                }
             }
             rayData.sampleData.nee_p_hat = { 0.f, 0.f, 0.f };
             rayData.sampleData.nee_w_i = 0.f;
-            
-            rayData.d.path_length_from_cam = rayData.pathLength + 2;
 
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
@@ -857,10 +863,15 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             }
             curBSDFSample = Sample(rayData.sampleData.bsdf_p_hat, rayData.sampleData.bsdf_w_i, rcVertex);
             curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / pre_rc_thp;
-            r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg);
+            if (r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg)) {
+                rayData.d.path_length_from_cam = rayData.pathLength + 2;
+                debugPath.length = depth + 1;
+            }
 
             debugBuffer[bufferInd] = rayData.d;
+            debugPath.vertices[depth + 1] = rayData.origin;
         }
+        gPathDebugBuffer[bufferInd] = debugPath;
     }
     else
     {
