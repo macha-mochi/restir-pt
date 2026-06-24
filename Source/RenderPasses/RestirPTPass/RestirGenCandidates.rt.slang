@@ -869,7 +869,9 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             }
 
             debugBuffer[bufferInd] = rayData.d;
-            debugPath.vertices[depth + 1] = rayData.origin;
+            if (!rayData.terminated) {
+                debugPath.vertices[depth + 1] = rayData.origin;
+            }
         }
         gPathDebugBuffer[bufferInd] = debugPath;
     }

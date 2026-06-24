@@ -301,6 +301,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     var = mpSpatiotemporalResamplingPass->getRootVar();
     var["CB"]["gFrameCount"] = mFrameCount;
     var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
+    var["CB"]["gOutputDimensions"] = targetDim;
 
     var["gCandidateBuffer"] = mpReservoirBuffers[mInputReservoirID];
     ref<Buffer> pResampledBuffer = mpReservoirBuffers[mOutputReservoirID];

@@ -7,6 +7,7 @@ cbuffer CB
 {
     uint gFrameCount;    // Frame count since scene was loaded.
     uint gPRNGDimension; // First available PRNG dimension.
+    uint2 gOutputDimensions; // dimensions of gOutputColor
 }
 
 // Inputs (will also modify reservoirs)
@@ -28,16 +29,31 @@ static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
 
 struct DebugData
 {
-    uint neighborInd;
-    bool shiftSucceeded;
+    bool nanFlag;
+    float3 shifted_p_hat;
+    float jacobian;
+    bool updatedReservoir[4];
+    float mi[4];
+    float wi[4];
+    int neighborInds[3];
 
     __init() {
-        shiftSucceeded = false;
+        nanFlag = false;
+        shifted_p_hat = float3(0.f);
+        jacobian = 0.f;
+        updatedReservoir = bool[4](false);
+        mi = float[4](0);
+        wi = float[4](0);
+        neighborInds = int[3](-1);
     }
 };
 
 float genBalanceHeuristic(float c_i, float p_from_i_y, float c_j, float p_from_j_y) {
     return c_i * p_from_i_y / (c_i * p_from_i_y + c_j * p_from_j_y);
+}
+
+uint ind(uint2 pixel) {
+    return pixel.y * gOutputDimensions.x + pixel.x;
 }
 
 /**
@@ -171,12 +187,10 @@ bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, in Sample X, out S
 [numthreads(16, 16, 1)] // TODO 16 was just chosen arbitrarily since that's what RTXDI uses
 void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     uint2 pixel = threadID.xy;
-    uint2 dims;
-    gOutputColor.GetDimensions(dims.x, dims.y);
 
-    if (any(pixel >= dims)) return; // return if oob
+    if (any(pixel >= gOutputDimensions)) return; // return if oob
 
-    uint bufferInd = pixel.y * dims.x + pixel.x;
+    uint pixelInd = ind(pixel);
     Reservoir r;
 
     SampleGenerator sg = SampleGenerator(pixel, gFrameCount);
@@ -188,103 +202,109 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     DebugData d = {};
 
     // Prep spatial domain data
-    bool validSpatialNeighbor[kNumSpatialNeighbors] = bool[kNumSpatialNeighbors](false);
-    int2 spatialNeighbors[kNumSpatialNeighbors] = int2[kNumSpatialNeighbors](-1, -1);
-    int2 neighbor;
+    bool validSpatialNeighbor[kNumSpatialNeighbors];
+    int2 spatialNeighbors[kNumSpatialNeighbors];
     for (int i = 0; i < kNumSpatialNeighbors; i++) {
-        if (getSpatialNeighbor(pixel, dims, kSpatialNeighborRadius, sg, neighbor)) {
+        int2 neighbor;
+        validSpatialNeighbor[i] = getSpatialNeighbor(pixel, gOutputDimensions, kSpatialNeighborRadius, sg, neighbor);
+        if (validSpatialNeighbor[i]) {
             spatialNeighbors[i] = neighbor;
+        } else {
+            spatialNeighbors[i] = int2(-1, -1);
         }
+        //d.neighborInds[i] = ind(spatialNeighbors[i]);
     }
 
     // New candidate generated this frame
-    float m_num = gCandidateBuffer[bufferInd].c * luminance(gCandidateBuffer[bufferInd].X.p_hat); // alr in the correct domain
+    float m_num = gCandidateBuffer[pixelInd].c * luminance(gCandidateBuffer[pixelInd].X.p_hat); // alr in the correct domain
     float m_den = m_num;
     for (int i = 0; i < kNumSpatialNeighbors; i++) {
         if (validSpatialNeighbor[i]) {
-            uint neighborInd = spatialNeighbors[i].y * dims.x + spatialNeighbors[i].x;
+            uint neighborInd = ind(spatialNeighbors[i]);
             Sample Y_neighborDomain = Sample::createNull();
             float jacobian = 0.f;
             // shift Y into others' domain
             bool success = false;
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
             {
-                success = performReconnectionShift(pixel, spatialNeighbors[i], gCandidateBuffer[bufferInd].X, Y_neighborDomain, jacobian, sg, d);
+                success = performReconnectionShift(pixel, spatialNeighbors[i], gCandidateBuffer[pixelInd].X, Y_neighborDomain, jacobian, sg, d);
             } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
 
             }
             if (success) {
-                m_den += gCandidateBuffer[bufferInd].c * luminance(Y_neighborDomain.p_hat) * jacobian; // we just did the inverse shift mapping, jacobian = |T(-1)(y)|
+                m_den += gCandidateBuffer[pixelInd].c * luminance(Y_neighborDomain.p_hat) * jacobian; // we just did the inverse shift mapping, jacobian = |T(-1)(y)|
             }
         }
     }
-    float w_i = (m_num == 0.f || m_den == 0.f) ? 0.f : (m_num / m_den) * luminance(gCandidateBuffer[bufferInd].X.p_hat) * gCandidateBuffer[bufferInd].W_X; // jacobian is 1
-    r.updateReservoir(gCandidateBuffer[bufferInd].X, w_i, gCandidateBuffer[bufferInd].c, sg);
+    float w_i = (m_num == 0.f || m_den == 0.f) ? 0.f : (m_num / m_den) * luminance(gCandidateBuffer[pixelInd].X.p_hat) * gCandidateBuffer[pixelInd].W_X; // jacobian is 1
+    d.updatedReservoir[0] = r.updateReservoir(gCandidateBuffer[pixelInd].X, w_i, gCandidateBuffer[pixelInd].c, sg);
+    d.mi[0] = m_num / m_den;
+    d.wi[0] = w_i;
 
     // Temporal
 
     // Spatial
     for (int i = 0; i < kNumSpatialNeighbors; i++) {
         if (validSpatialNeighbor[i]) {
-            uint neighborInd = neighbor.y * dims.x + neighbor.x;
-            d.neighborInd = neighborInd;
-
+            uint neighborInd = ind(spatialNeighbors[i]);
             Sample neighbor_curDomain = Sample::createNull();
             float w_i = 0.f;
             float jacobian = 0.f; // jacobian of shifting X into [pixel]'s domain, |T(X)|
             bool shiftSucceeded = false;
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
             {
-                shiftSucceeded = performReconnectionShift(neighbor, pixel, gCandidateBuffer[neighborInd].X, neighbor_curDomain, jacobian, sg, d);
+                shiftSucceeded = performReconnectionShift(spatialNeighbors[i], pixel, gCandidateBuffer[neighborInd].X, neighbor_curDomain, jacobian, sg, d);
             } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
             {
                 // do hybrid mapping
             }
-            d.shiftSucceeded = shiftSucceeded;
 
+            //d.mi[i + 1] = 0;
+            //d.wi[i + 1] = 0;
             if (shiftSucceeded) {
                 float m_num = gCandidateBuffer[neighborInd].c * luminance(gCandidateBuffer[neighborInd].X.p_hat) / jacobian; // i is the domain that [preshiftNeighbor] came from
                 float m_den = m_num;
                 // process new candidate for m_den
-                m_den += gCandidateBuffer[bufferInd].c * luminance(gCandidateBuffer[bufferInd].X.p_hat); //jacobian is 1 since it came from this domain
+                m_den += gCandidateBuffer[pixelInd].c * luminance(gCandidateBuffer[pixelInd].X.p_hat); //jacobian is 1 since it came from this domain
                 // process other spatial ones
                 Sample shifted = Sample::createNull();
                 float j_inverse = 0.f; // jacobian of shifting samples into this spatial neighbor's domain, |T(-1)(y)|
                 bool success = false;
                 for (int j = 0; j < kNumSpatialNeighbors; j++) {
                     if (j != i && validSpatialNeighbor[j]) {
-                        uint nInd = spatialNeighbors[j].y * dims.x + spatialNeighbors[j].x;
-                        success = performReconnectionShift(pixel, spatialNeighbors[j], neighbor_curDomain, shifted, jacobian, sg, d);
+                        success = performReconnectionShift(pixel, spatialNeighbors[j], neighbor_curDomain, shifted, j_inverse, sg, d);
                         if (success) {
-                            m_den += gCandidateBuffer[nInd].c * luminance(shifted.p_hat) * j_inverse;
+                            m_den += gCandidateBuffer[ind(spatialNeighbors[j])].c * luminance(shifted.p_hat) * j_inverse;
                         }
                     }
                 }
 
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
                 w_i = (m_num / m_den) * luminance(neighbor_curDomain.p_hat) * gCandidateBuffer[neighborInd].W_X * jacobian;
+                d.shifted_p_hat = neighbor_curDomain.p_hat;
+                d.jacobian = jacobian;
+                //d.mi[i + 1] = m_num / m_den;
+                //d.wi[i + 1] = w_i;
             }
             // update reservoir streaming (in new buffer)
             neighbor_curDomain.w_i = w_i;
             r.updateReservoir(neighbor_curDomain, w_i, gCandidateBuffer[neighborInd].c, sg);
-            if (isnan(r.W_X)) {
-                gOutputColor[pixel] = float4(0, 1, 0, 1);
+            if (isnan(w_i)) {
+                gOutputColor[pixel] = float4(1, 0, 1, 1);
+                gResampledBuffer[pixelInd] = r;
+                debugBuffer[pixelInd] = d;
+                debugBuffer[0].nanFlag = true;
+                gPathDebugBuffer[pixelInd].rcIndex = 2;
                 return;
             }
         }
     }
-
-    gResampledBuffer[bufferInd] = r;
-    debugBuffer[bufferInd] = d;
-    gPathDebugBuffer[bufferInd].rcIndex = 2;
+    gResampledBuffer[pixelInd] = r;
+    debugBuffer[pixelInd] = d;
+    gPathDebugBuffer[pixelInd].rcIndex = 2;
 
     float3 f_X = r.X.p_hat;
     float W_X = r.W_X;
-    float3 di_bg = gDI_BGBuffer[bufferInd];
-    if (isnan(W_X)) {
-        //gOutputColor[pixel] = float4(0, 0, 1, 1);
-    } else {
-        //gOutputColor[pixel] = float4(0, 0, 0, 1);
-    }
-    gOutputColor[pixel] = float4(gCandidateBuffer[bufferInd].X.p_hat * gCandidateBuffer[bufferInd].W_X + di_bg, 1.f);
+    float3 di_bg = gDI_BGBuffer[pixelInd];
+    gOutputColor[pixel] = float4(f_X * W_X + di_bg, 1.f);
 }
