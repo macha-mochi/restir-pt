@@ -47,12 +47,15 @@ const char kPathViewerShaderFile[] = "RenderPasses/RestirPTPass/PathViewer.cs.sl
 const uint32_t kMaxPayloadSizeBytes = 350u;
 const uint32_t kMaxRecursionDepth = 2u;
 
-const char kInputViewDir[] = "viewW";
+const std::string kInputVBuffer = "vbuffer";
+const std::string kInputViewDir = "viewW";
+const std::string kInputMotionVectors = "mvec";
 
 const ChannelList kInputChannels = {
     // clang-format off
-    { "vbuffer",        "gVBuffer",     "Visibility buffer in packed format" },
+    { kInputVBuffer,        "gVBuffer",     "Visibility buffer in packed format" },
     { kInputViewDir,    "gViewW",       "World-space view direction (xyz float format)", true /* optional */ },
+    { kInputMotionVectors,  "gMotionVectors",   "Motion vector buffer (float format)", true /* optional */ },
     // clang-format on
 };
 
@@ -76,8 +79,9 @@ RestirPTPass::RestirPTPass(ref<Device> pDevice, const Properties& props) : Rende
     mpSampleGenerator = SampleGenerator::create(mpDevice, SAMPLE_GENERATOR_UNIFORM);
     FALCOR_ASSERT(mpSampleGenerator);
 
-    mInputReservoirID = 0;
-    mOutputReservoirID = 1;
+    mOutputReservoirID = 0;
+    mTemporalReservoirID = 1;
+    mCandidateReservoirID = 2;
 }
 
 void RestirPTPass::parseProperties(const Properties& props)
@@ -262,13 +266,13 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     // Create the reservoirs buffer here if needed since that's an output of ray gen pass
     uint32_t elementCount = targetDim.x * targetDim.y;
 
-    ref<Buffer> pCandidateBuffer = mpReservoirBuffers[mInputReservoirID];
+    ref<Buffer> pCandidateBuffer = mpReservoirBuffers[mCandidateReservoirID];
     if (!pCandidateBuffer || pCandidateBuffer->getElementCount() < elementCount)
     {
         pCandidateBuffer = mpDevice->createStructuredBuffer(var["gReservoirBuffer"], elementCount);
         pCandidateBuffer->setName("Restir Candidate Reservoirs");
         var["gReservoirBuffer"] = pCandidateBuffer;
-        mpReservoirBuffers[mInputReservoirID] = pCandidateBuffer;
+        mpReservoirBuffers[mCandidateReservoirID] = pCandidateBuffer;
     }
     if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
     {
@@ -293,25 +297,43 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
 
     //SPATIOTEMPORAL RESAMPLING COMPUTE PASS
-    //Add defines, prepare vars, set constants, and bind i/o buffers
+    //Set shader vars, and bind i/o buffers
     //don't add new defines here bc the compute pass is already set after you created it when you set the scene
     auto program = mpSpatiotemporalResamplingPass->getProgram();
-    program->addDefine("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
+    program->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
+    program->addDefine("USE_SPATIAL", mUseSpatialReuse ? "1" : "0");
+    program->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0"); //we don't want to do temporal reuse if we have no temporal history yet
 
     var = mpSpatiotemporalResamplingPass->getRootVar();
     var["CB"]["gFrameCount"] = mFrameCount;
     var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
     var["CB"]["gOutputDimensions"] = targetDim;
+    if (temporalVBuffer)
+    {
+        var["gTemporalVBuffer"] = temporalVBuffer;
+    }
+    if (temporalViewDir)
+    {
+        var["gTemporalViewW"] = temporalViewDir;
+    }
 
-    var["gCandidateBuffer"] = mpReservoirBuffers[mInputReservoirID];
+    var["gCandidateBuffer"] = mpReservoirBuffers[mCandidateReservoirID];
     ref<Buffer> pResampledBuffer = mpReservoirBuffers[mOutputReservoirID];
     if (!pResampledBuffer || pResampledBuffer->getElementCount() < elementCount)
     {
         pResampledBuffer = mpDevice->createStructuredBuffer(var["gResampledBuffer"], elementCount);
-        pResampledBuffer->setName("Restir Resampled Reservoirs");
-        var["gResampledBuffer"] = pResampledBuffer;
         mpReservoirBuffers[mOutputReservoirID] = pResampledBuffer;
     }
+    pResampledBuffer->setName("Restir Resampled Reservoirs");
+    var["gResampledBuffer"] = pResampledBuffer;
+    ref<Buffer> pTemporalBuffer = mpReservoirBuffers[mTemporalReservoirID];
+    if (!pTemporalBuffer || pTemporalBuffer->getElementCount() < elementCount)
+    {
+        pTemporalBuffer = mpDevice->createStructuredBuffer(var["gTemporalBuffer"], elementCount);
+        mpReservoirBuffers[mTemporalReservoirID] = pTemporalBuffer;
+    }
+    pTemporalBuffer->setName("Restir Temporal Reservoirs");
+    var["gTemporalBuffer"] = pTemporalBuffer;
     var["gDI_BGBuffer"] = mpDiBgBuffer;
     if (!mpResamplingDebugBuffer || mpResamplingDebugBuffer->getElementCount() < elementCount)
     {
@@ -341,6 +363,12 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     bindShaderDataInternal(var, pMotionVectors); */
     mpSpatiotemporalResamplingPass->execute(pRenderContext, targetDim.x, targetDim.y);
 
+    //Update data for next frame
+    mTemporalReservoirID = mOutputReservoirID; //ex: if output used to be 0 and temporal used to be 1, output becomes 1 and temporal becomes 0
+    mOutputReservoirID = 1 - mOutputReservoirID; //ready to be re-written to
+    temporalVBuffer = renderData.getTexture(kInputVBuffer);
+    temporalViewDir = renderData.getTexture(kInputViewDir);
+
     mFrameCount++;
 }
 
@@ -355,6 +383,18 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
 
     dirty |= widget.checkbox("Use importance sampling", mUseImportanceSampling);
     widget.tooltip("Use importance sampling for materials", true);
+
+    dirty |= widget.checkbox("Spatial reuse", mUseSpatialReuse);
+    widget.tooltip("Use spatial reuse for Restir resampling", true);
+
+    if (mUseSpatialReuse)
+    {
+        dirty |= widget.var("Num spatial neighbors", mNumSpatialNeighbors, 1u, 10u);
+        widget.tooltip("Number of spatial neighbors to resample from. Capped at 10 currently, recommended 3", true);
+    }
+
+    dirty |= widget.checkbox("Temporal reuse", mUseTemporalReuse);
+    widget.tooltip("Use temporal reuse for Restir resampling", true);
 
     dirty |= widget.dropdown("Shift mapping type", mShiftMappingType);
     widget.tooltip("What type of shift mapping to use for spatial/temporal reuse.", true);
@@ -494,7 +534,10 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         };
         mpSpatiotemporalResamplingPass = createComputePass(
             kResampleComputeShaderFile, "spatiotemporalResampling",
-            {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)}}
+            {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)},
+             {"USE_SPATIAL", mUseSpatialReuse ? "1" : "0"},
+             {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
+             {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"}}
         );
     }
 }

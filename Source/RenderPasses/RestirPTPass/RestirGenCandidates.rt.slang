@@ -67,6 +67,7 @@ ParameterBlock<EmissiveLightSampler> emissiveSampler; ///< Emissive light sample
 // Inputs
 Texture2D<PackedHitInfo> gVBuffer;
 Texture2D<float4> gViewW; // Optional
+Texture2D<float2> gMotionVectors; // Not used in this shader
 
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> gReservoirBuffer;

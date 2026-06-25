@@ -12,6 +12,7 @@ def render_graph_RestirPT():
     g.addPass(VBufferRT, "VBufferRT")
     g.addEdge("VBufferRT.vbuffer", "RestirPTPass.vbuffer")
     g.addEdge("VBufferRT.viewW", "RestirPTPass.viewW")
+    g.addEdge("VBufferRT.mvec", "RestirPTPass.mvec")
     g.addEdge("RestirPTPass.color", "AccumulatePass.input")
     g.addEdge("AccumulatePass.output", "ToneMapper.src")
     g.markOutput("ToneMapper.dst")

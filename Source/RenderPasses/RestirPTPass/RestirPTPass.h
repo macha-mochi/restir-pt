@@ -85,6 +85,12 @@ private:
     bool mUseImportanceSampling = true;
     /// Type of shift mapping used
     ShiftMappingType mShiftMappingType = ShiftMappingType::Reconnection;
+    /// Whether to do spatial reuse
+    bool mUseSpatialReuse = true;
+    /// Number of spatial neighbors per pixel
+    uint mNumSpatialNeighbors = 3;
+    /// Whether to do temporal reuse
+    bool mUseTemporalReuse = true;
 
     // Runtime data
 
@@ -101,9 +107,13 @@ private:
     } mTracer;
 
     //Resources
-    ref<Buffer> mpReservoirBuffers[2]; ///< Length 2 array containing buffers of path reservoirs
-    uint mInputReservoirID; ///< these will be 0 or 1
+    ref<Buffer> mpReservoirBuffers[3]; ///< Length 3 array containing buffers of path reservoirs: last frame's final samples, this frame's new samples, and this frame's final samples
+    ///< these will be 0, 1, or 2
+    uint mTemporalReservoirID; //temporal = last frame
+    uint mCandidateReservoirID; 
     uint mOutputReservoirID;
+    ref<Texture> temporalVBuffer; ///< Last frame's vbuffer of packedhitinfos
+    ref<Texture> temporalViewDir; ///< Last frame's view direction texture
 
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
 

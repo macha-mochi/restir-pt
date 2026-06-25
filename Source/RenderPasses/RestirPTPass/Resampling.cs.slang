@@ -13,7 +13,12 @@ cbuffer CB
 // Inputs (will also modify reservoirs)
 Texture2D<PackedHitInfo> gVBuffer;
 Texture2D<float4> gViewW; // Originally optional but we include it
+Texture2D<float2> gMotionVectors;
+Texture2D<PackedHitInfo> gTemporalVBuffer;
+Texture2D<float4> gTemporalViewW;
+
 StructuredBuffer<Reservoir> gCandidateBuffer;
+StructuredBuffer<Reservoir> gTemporalBuffer;
 RWStructuredBuffer<Reservoir> gResampledBuffer;
 RWStructuredBuffer<float3> gDI_BGBuffer; // direct illumination / env map bg buffer, to be added to f_X * W_X at the end
 // Outputs
@@ -23,13 +28,14 @@ RWTexture2D<float4> gOutputColor;
 RWStructuredBuffer<DebugData> debugBuffer;
 RWStructuredBuffer<Path> gPathDebugBuffer;
 
-static const uint kNumSpatialNeighbors = 3;
+static const bool kPerformSpatialReuse = USE_SPATIAL;
+static const uint kNumSpatialNeighbors = NUM_SPATIAL_NEIGHBORS;
 static const uint kSpatialNeighborRadius = 20;
+static const bool kPerformTemporalReuse = USE_TEMPORAL;
 static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
 
 struct DebugData
 {
-    bool nanFlag;
     float3 shifted_p_hat;
     float jacobian;
     bool updatedReservoir[4];
@@ -38,7 +44,6 @@ struct DebugData
     int neighborInds[3];
 
     __init() {
-        nanFlag = false;
         shifted_p_hat = float3(0.f);
         jacobian = 0.f;
         updatedReservoir = bool[4](false);
@@ -54,6 +59,12 @@ float genBalanceHeuristic(float c_i, float p_from_i_y, float c_j, float p_from_j
 
 uint ind(uint2 pixel) {
     return pixel.y * gOutputDimensions.x + pixel.x;
+}
+
+// Finds the pixel position of [pixel] last frame, returning false if it would be out of bounds
+bool calcLastFramePos(uint2 pixel, out int2 result) {
+    result = (int2)((pixel + float2(0.5f, 0.5f)) - gMotionVectors[pixel] * gOutputDimensions);
+    return all(result >= 0) && all(result < gOutputDimensions);
 }
 
 /**
@@ -91,26 +102,25 @@ bool traceShadowRay(float3 origin, float3 dir, float distance) {
 }
 
 // Returns a pixel location randomly selected from within a certain radius of the current pixel in [neighbor]. Returns false if it was oob
-bool getSpatialNeighbor(uint2 pixel, uint2 dims, uint radius, inout SampleGenerator sg, out int2 neighbor) {
+bool getSpatialNeighbor(uint2 pixel, uint radius, inout SampleGenerator sg, out int2 neighbor) {
     int2 offset = (int2)(radius * sample_disk(sampleNext2D(sg)));
     neighbor = pixel + offset;
-    if(neighbor.x < 0 || neighbor.x >= dims.x || neighbor.y < 0 || neighbor.y >= dims.y) {
+    if (neighbor.x < 0 || neighbor.x >= gOutputDimensions.x || neighbor.y < 0 || neighbor.y >= gOutputDimensions.y) {
         return false;
     }
     return true;
 }
 
-// Shifts sample X into the current pixel's domain using reconnection shift. srcPixel = pixel to shift from, dstPixel = pixel to shift to
-bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, in Sample X, out Sample Y, out float jacobian, inout SampleGenerator sg, inout DebugData d) {
-    uint2 dims;
-    gOutputColor.GetDimensions(dims.x, dims.y);
-
+// Shifts sample X into the current pixel's domain using reconnection shift
+// srcPixel = pixel to shift from, dstPixel = pixel to shift to
+bool performReconnectionShift(uint2 srcPixel, bool temporalSrc, uint2 dstPixel, bool temporalDst, in Sample X, out Sample Y, out float jacobian, inout SampleGenerator sg, inout DebugData d) {
     const float3 primaryRayOrigin = gScene.camera.getPosition();
+    const float3 temporalPrimaryRayOrigin = gScene.camera.data.prevPosW;
 
-    uint srcBufferInd = srcPixel.y * dims.x + srcPixel.x;
+    uint srcBufferInd = ind(srcPixel);
 
-    const HitInfo srcHit = HitInfo(gVBuffer[srcPixel]);
-    const HitInfo dstHit = HitInfo(gVBuffer[dstPixel]);
+    const HitInfo srcHit = temporalSrc ? HitInfo(gTemporalVBuffer[srcPixel]) : HitInfo(gVBuffer[srcPixel]);
+    const HitInfo dstHit = temporalDst ? HitInfo(gTemporalVBuffer[dstPixel]) : HitInfo(gVBuffer[dstPixel]);
     if (srcHit.isValid() && dstHit.isValid())
     {
         //Both pixels were valid primary hits. Find modified thp
@@ -118,7 +128,7 @@ bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, in Sample X, out S
         ///>> Find bsdf * cos * bsdf * cos for offset path, so you can multiply by incomingRadiance of base path.
 
         // Load shading data.
-        ShadingData dstSD = loadShadingData(dstHit, primaryRayOrigin, -gViewW[dstPixel].xyz);
+        ShadingData dstSD = loadShadingData(dstHit, temporalDst ? temporalPrimaryRayOrigin : primaryRayOrigin, temporalDst ? -gTemporalViewW[dstPixel].xyz : -gViewW[dstPixel].xyz);
        
         // Compute ray origin for new rays spawned from the G-buffer.
         float3 dstRayOrigin = dstSD.computeRayOrigin();
@@ -134,18 +144,24 @@ bool performReconnectionShift(uint2 srcPixel, uint2 dstPixel, in Sample X, out S
         }
 
         // Since we have a valid x2 vertex, first find geometry term for base path to use later in jacobian
-        ShadingData srcSD = loadShadingData(srcHit, primaryRayOrigin, -gViewW[srcPixel].xyz);
+        ShadingData srcSD = loadShadingData(srcHit, temporalSrc ? temporalPrimaryRayOrigin : primaryRayOrigin, temporalSrc ? -gTemporalViewW[srcPixel].xyz : -gViewW[srcPixel].xyz);
         float3 srcRayOrigin = srcSD.computeRayOrigin(); //this is the place where the ray from x1 to x2 originated
         //Find rc position
         float3 rcPos;
         if (rcHitInfo.getType() == HitType::Triangle) {
-            rcPos = gScene.getVertexData(rcHitInfo.getTriangleHit()).posW;
+            //getPrevPosW: where was this triangle last frame? if the mesh itself didn't move then the world space pos should be the same
+            rcPos = temporalSrc ? gScene.getPrevPosW(rcHitInfo) : gScene.getVertexData(rcHitInfo.getTriangleHit()).posW;
         } else {
             // oither types not supported for now
             return false;
         }
         float3 srcX1_to_X2 = rcPos - srcRayOrigin;
         float3 dirX1_to_X2 = normalize(srcX1_to_X2);
+
+        /*
+        MODIFIED UP TO HERE, NOT CORRECT!! 
+        */
+
         srcSD = loadShadingData(rcHitInfo, srcRayOrigin, dirX1_to_X2); // set srcSD to be shading data at x2 on the base path
         float srcG = abs(dot(srcSD.faceN, -dirX1_to_X2)) / dot(srcX1_to_X2, srcX1_to_X2);
 
@@ -204,39 +220,54 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     // Prep spatial domain data
     bool validSpatialNeighbor[kNumSpatialNeighbors];
     int2 spatialNeighbors[kNumSpatialNeighbors];
-    for (int i = 0; i < kNumSpatialNeighbors; i++) {
-        int2 neighbor;
-        validSpatialNeighbor[i] = getSpatialNeighbor(pixel, gOutputDimensions, kSpatialNeighborRadius, sg, neighbor);
-        if (validSpatialNeighbor[i]) {
-            spatialNeighbors[i] = neighbor;
-        } else {
-            spatialNeighbors[i] = int2(-1, -1);
+    if (kPerformSpatialReuse) {
+        for (int i = 0; i < kNumSpatialNeighbors; i++) {
+            int2 neighbor;
+            validSpatialNeighbor[i] = getSpatialNeighbor(pixel, kSpatialNeighborRadius, sg, neighbor);
+            if (validSpatialNeighbor[i]) {
+                spatialNeighbors[i] = neighbor;
+            } else {
+                spatialNeighbors[i] = int2(-1, -1);
+            }
+            //d.neighborInds[i] = ind(spatialNeighbors[i]);
         }
-        //d.neighborInds[i] = ind(spatialNeighbors[i]);
     }
 
     // New candidate generated this frame
     float m_num = gCandidateBuffer[pixelInd].c * luminance(gCandidateBuffer[pixelInd].X.p_hat); // alr in the correct domain
     float m_den = m_num;
-    for (int i = 0; i < kNumSpatialNeighbors; i++) {
-        if (validSpatialNeighbor[i]) {
-            uint neighborInd = ind(spatialNeighbors[i]);
-            Sample Y_neighborDomain = Sample::createNull();
-            float jacobian = 0.f;
-            // shift Y into others' domain
-            bool success = false;
-            if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
-            {
-                success = performReconnectionShift(pixel, spatialNeighbors[i], gCandidateBuffer[pixelInd].X, Y_neighborDomain, jacobian, sg, d);
-            } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
-
-            }
-            if (success) {
-                m_den += gCandidateBuffer[pixelInd].c * luminance(Y_neighborDomain.p_hat) * jacobian; // we just did the inverse shift mapping, jacobian = |T(-1)(y)|
+    if (kPerformSpatialReuse) {
+        for (int i = 0; i < kNumSpatialNeighbors; i++) {
+            if (validSpatialNeighbor[i]) {
+                Sample Y_neighborDomain = Sample::createNull();
+                float jacobian = 0.f;
+                // shift Y into others' domain
+                bool success = false;
+                if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
+                {
+                    success = performReconnectionShift(pixel, false, spatialNeighbors[i], false, gCandidateBuffer[pixelInd].X, Y_neighborDomain, jacobian, sg, d);
+                } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
+                }
+                if (success) {
+                    m_den += gCandidateBuffer[pixelInd].c * luminance(Y_neighborDomain.p_hat) * jacobian; // we just did the inverse shift mapping, jacobian = |T(-1)(y)|
+                }
             }
         }
     }
-    float w_i = (m_num == 0.f || m_den == 0.f) ? 0.f : (m_num / m_den) * luminance(gCandidateBuffer[pixelInd].X.p_hat) * gCandidateBuffer[pixelInd].W_X; // jacobian is 1
+    if(kPerformTemporalReuse){
+        int2 pixelLastFrame;
+        if(calcLastFramePos(pixel, pixelLastFrame)) {
+            Sample shifted = Sample::createNull();
+            float jacobian = 0.f; // this is the jacobian of shifting Y into last frame's domain, so it's an inverse shift mapping
+            bool success = performReconnectionShift(pixel, false, pixelLastFrame, true, gCandidateBuffer[pixelInd].X, shifted, jacobian, sg, d);
+            if (success) {
+                m_den += gCandidateBuffer[pixelInd].c * luminance(shifted.p_hat) * jacobian;
+            }
+        }
+    }
+    
+    float w_i = (m_num / m_den) * luminance(gCandidateBuffer[pixelInd].X.p_hat) * gCandidateBuffer[pixelInd].W_X; // jacobian is 1
+    if (isnan(w_i)) w_i = 0.f;
     d.updatedReservoir[0] = r.updateReservoir(gCandidateBuffer[pixelInd].X, w_i, gCandidateBuffer[pixelInd].c, sg);
     d.mi[0] = m_num / m_den;
     d.wi[0] = w_i;
@@ -244,61 +275,57 @@ void spatiotemporalResampling(uint3 threadID: SV_DispatchThreadID) {
     // Temporal
 
     // Spatial
-    for (int i = 0; i < kNumSpatialNeighbors; i++) {
-        if (validSpatialNeighbor[i]) {
-            uint neighborInd = ind(spatialNeighbors[i]);
-            Sample neighbor_curDomain = Sample::createNull();
-            float w_i = 0.f;
-            float jacobian = 0.f; // jacobian of shifting X into [pixel]'s domain, |T(X)|
-            bool shiftSucceeded = false;
-            if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
-            {
-                shiftSucceeded = performReconnectionShift(spatialNeighbors[i], pixel, gCandidateBuffer[neighborInd].X, neighbor_curDomain, jacobian, sg, d);
-            } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
-            {
-                // do hybrid mapping
-            }
-
-            //d.mi[i + 1] = 0;
-            //d.wi[i + 1] = 0;
-            if (shiftSucceeded) {
-                float m_num = gCandidateBuffer[neighborInd].c * luminance(gCandidateBuffer[neighborInd].X.p_hat) / jacobian; // i is the domain that [preshiftNeighbor] came from
-                float m_den = m_num;
-                // process new candidate for m_den
-                m_den += gCandidateBuffer[pixelInd].c * luminance(gCandidateBuffer[pixelInd].X.p_hat); //jacobian is 1 since it came from this domain
-                // process other spatial ones
-                Sample shifted = Sample::createNull();
-                float j_inverse = 0.f; // jacobian of shifting samples into this spatial neighbor's domain, |T(-1)(y)|
-                bool success = false;
-                for (int j = 0; j < kNumSpatialNeighbors; j++) {
-                    if (j != i && validSpatialNeighbor[j]) {
-                        success = performReconnectionShift(pixel, spatialNeighbors[j], neighbor_curDomain, shifted, j_inverse, sg, d);
-                        if (success) {
-                            m_den += gCandidateBuffer[ind(spatialNeighbors[j])].c * luminance(shifted.p_hat) * j_inverse;
-                        }
-                    }
+    if (kPerformSpatialReuse) {
+        for (int i = 0; i < kNumSpatialNeighbors; i++) {
+            if (validSpatialNeighbor[i]) {
+                uint neighborInd = ind(spatialNeighbors[i]);
+                Sample neighbor_curDomain = Sample::createNull();
+                float w_i = 0.f;
+                float jacobian = 0.f; // jacobian of shifting X into [pixel]'s domain, |T(X)|
+                bool shiftSucceeded = false;
+                if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
+                {
+                    shiftSucceeded = performReconnectionShift(spatialNeighbors[i], false, pixel, false, gCandidateBuffer[neighborInd].X, neighbor_curDomain, jacobian, sg, d);
+                } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
+                {
+                    // do hybrid mapping
                 }
 
-                // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
-                w_i = (m_num / m_den) * luminance(neighbor_curDomain.p_hat) * gCandidateBuffer[neighborInd].W_X * jacobian;
-                d.shifted_p_hat = neighbor_curDomain.p_hat;
-                d.jacobian = jacobian;
-                //d.mi[i + 1] = m_num / m_den;
-                //d.wi[i + 1] = w_i;
-            }
-            // update reservoir streaming (in new buffer)
-            neighbor_curDomain.w_i = w_i;
-            r.updateReservoir(neighbor_curDomain, w_i, gCandidateBuffer[neighborInd].c, sg);
-            if (isnan(w_i)) {
-                gOutputColor[pixel] = float4(1, 0, 1, 1);
-                gResampledBuffer[pixelInd] = r;
-                debugBuffer[pixelInd] = d;
-                debugBuffer[0].nanFlag = true;
-                gPathDebugBuffer[pixelInd].rcIndex = 2;
-                return;
+                // d.mi[i + 1] = 0;
+                // d.wi[i + 1] = 0;
+                if (shiftSucceeded) {
+                    float m_num = gCandidateBuffer[neighborInd].c * luminance(gCandidateBuffer[neighborInd].X.p_hat) / jacobian; // i is the domain that [preshiftNeighbor] came from
+                    float m_den = m_num;
+                    // process new candidate for m_den
+                    m_den += gCandidateBuffer[pixelInd].c * luminance(gCandidateBuffer[pixelInd].X.p_hat); // jacobian is 1 since it came from this domain
+                    // process other spatial ones
+                    Sample shifted = Sample::createNull();
+                    float j_inverse = 0.f; // jacobian of shifting samples into this spatial neighbor's domain, |T(-1)(y)|
+                    bool success = false;
+                    for (int j = 0; j < kNumSpatialNeighbors; j++) {
+                        if (j != i && validSpatialNeighbor[j]) {
+                            success = performReconnectionShift(pixel, false, spatialNeighbors[j], false, neighbor_curDomain, shifted, j_inverse, sg, d);
+                            if (success) {
+                                m_den += gCandidateBuffer[ind(spatialNeighbors[j])].c * luminance(shifted.p_hat) * j_inverse;
+                            }
+                        }
+                    }
+
+                    // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
+                    w_i = (m_num / m_den) * luminance(neighbor_curDomain.p_hat) * gCandidateBuffer[neighborInd].W_X * jacobian;
+                    if (isnan(w_i)) w_i = 0.f;
+                    d.shifted_p_hat = neighbor_curDomain.p_hat;
+                    d.jacobian = jacobian;
+                    // d.mi[i + 1] = m_num / m_den;
+                    // d.wi[i + 1] = w_i;
+                }
+                // update reservoir streaming (in new buffer)
+                neighbor_curDomain.w_i = w_i;
+                r.updateReservoir(neighbor_curDomain, w_i, gCandidateBuffer[neighborInd].c, sg);
             }
         }
     }
+    
     gResampledBuffer[pixelInd] = r;
     debugBuffer[pixelInd] = d;
     gPathDebugBuffer[pixelInd].rcIndex = 2;
