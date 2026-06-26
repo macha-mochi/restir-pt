@@ -6,7 +6,7 @@ import Scene.Camera.CameraData;
 // Inputs
 StructuredBuffer<Path> gPathDataBuffer;
 uniform uint2 gMousePixelPos;
-uniform float4x4 gViewProjMat;
+uniform float4x4 gViewProjMatNoJitter;
 uniform float3 testPoint;
 // Outputs
 RWTexture2D<float4> gOutputColor;
@@ -15,23 +15,15 @@ RWStructuredBuffer<DebugData> debugBuffer;
 
 struct DebugData {
     float A;
-    float B;
-    float C;
-    float dist;
-
-    __init() {
-        A = B = C = dist = 0.f;
-    }
 }
 
 /**
  converts posW to a uint2 in pixel coordinates. [0, 0] is top left, (1920, 1080) is bottom right.
- this only converts to within 1 pixel of precision, do not use if you need pixel perfect :(
 
  dimensions outside of [1920, 1080] theoretically allowed, like if posW is not in the view of the camera
 */
 int2 worldToScreen(float3 posW, uint2 dims) {
-    float4 clipSpace = mul(gViewProjMat, float4(posW, 1.f));
+    float4 clipSpace = mul(gViewProjMatNoJitter, float4(posW, 1.f));
     float3 ndc = clipSpace.xyz / clipSpace.w; // in range [-1, 1] if on screen
     float2 coord = float2((ndc.x + 1) / 2, (1 - ndc.y) / 2) * float2(dims);
     return (int2)coord;
@@ -71,7 +63,7 @@ void drawPaths(uint3 threadID: SV_DispatchThreadID) {
     // Overall goal: if this pixel is part of one of the line segments on this path, color it
 
     uint mouseBufferInd = gMousePixelPos.y * dims.x + gMousePixelPos.x;
-    uint bufferInd = pixel.y * dims.x + pixel.x;
+    uint pixelInd = pixel.y * dims.x + pixel.x;
 
     DebugData d = {};
     for (int i = 0; i < gPathDataBuffer[mouseBufferInd].length - 1; i++) {

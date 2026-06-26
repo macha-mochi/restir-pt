@@ -166,7 +166,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         var["gMousePixelPos"] = mMousePixelPos;
         for (auto channel : kOutputChannels)
             bind(var, channel);
-        var["gViewProjMat"] = mpScene->getCamera()->getViewProjMatrix();
+        var["gViewProjMatNoJitter"] = mpScene->getCamera()->getViewProjMatrixNoJitter();
 
         uint32_t elementCount = targetDim.x * targetDim.y;
         if (!tempBuffer || tempBuffer->getElementCount() < elementCount)
@@ -539,6 +539,8 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
              {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
              {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"}}
         );
+
+        mpScene->getCamera()->setJitter(0.f, 0.f); // set jitter to 0
     }
 }
 void RestirPTPass::resetLighting()
