@@ -366,8 +366,32 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     //Update data for next frame
     mTemporalReservoirID = mOutputReservoirID; //ex: if output used to be 0 and temporal used to be 1, output becomes 1 and temporal becomes 0
     mOutputReservoirID = 1 - mOutputReservoirID; //ready to be re-written to
-    temporalVBuffer = renderData.getTexture(kInputVBuffer);
-    temporalViewDir = renderData.getTexture(kInputViewDir);
+    if (!temporalVBuffer || (temporalVBuffer->getWidth() < targetDim.x || temporalVBuffer->getHeight() < targetDim.y))
+    {
+        temporalVBuffer = mpDevice->createTexture2D(
+            targetDim.x,
+            targetDim.y,
+            ResourceFormat::RGBA32Uint,
+            1,
+            1,
+            nullptr,
+            ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
+        );
+    }
+    pRenderContext->copyResource(temporalVBuffer.get(), renderData.getTexture(kInputVBuffer).get());
+    if (!temporalViewDir || (temporalViewDir->getWidth() < targetDim.x || temporalViewDir->getHeight() < targetDim.y))
+    {
+        temporalViewDir = mpDevice->createTexture2D(
+            targetDim.x,
+            targetDim.y,
+            ResourceFormat::RGBA32Float,
+            1,
+            1,
+            nullptr,
+            ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
+        );
+    }
+    pRenderContext->copyResource(temporalViewDir.get(), renderData.getTexture(kInputViewDir).get());
 
     mFrameCount++;
 }
@@ -539,8 +563,6 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
              {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
              {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"}}
         );
-
-        mpScene->getCamera()->setJitter(0.f, 0.f); // set jitter to 0
     }
 }
 void RestirPTPass::resetLighting()

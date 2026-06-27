@@ -125,7 +125,7 @@ private:
     ref<Buffer> mpCandidateGenDebugBuffer;
     ref<Buffer> mpResamplingDebugBuffer;
 
-    bool mUsePathViewer; // if true, the renderer is paused so you can click around pixels on that frame
+    bool mUsePathViewer = false; // if true, the renderer is paused so you can click around pixels on that frame
     uint2 mMousePixelPos;
     ref<Buffer> mpDebugPathBuffer;
     ref<ComputePass> mpPathViewerPass;
