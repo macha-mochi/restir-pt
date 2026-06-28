@@ -494,6 +494,24 @@ struct Scene
         return computeVertexData(vertices, worldMat, worldInvTransposeMat, isFrontFaceCW, barycentrics);
     }
 
+    /** faye: Returns the interpolated vertex attributes for a given triangle LAST FRAME. Includes jitter in camera matrices just like getVertexData
+    \param[in] instanceID Geometry instance ID of the mesh.
+    \param[in] triangleIndex Index of the triangle in the given mesh.
+    \param[in] barycentrics Barycentric coordinates in the triangle.
+    \param[out] Unpacked fetched vertices which can be used for further computations involving individual vertices.
+    \return Interpolated vertex attributes.
+*/
+    VertexData getTemporalVertexData(const GeometryInstanceID instanceID, const uint triangleIndex, const float3 barycentrics, out StaticVertexData vertices[3])
+    {
+        const uint3 vtxIndices = getIndices(instanceID, triangleIndex); //indices of the same triangle in the vbuffer shouldn't change from frame to frame
+        vertices = { gScene.getVertex(vtxIndices[0]), gScene.getVertex(vtxIndices[1]), gScene.getVertex(vtxIndices[2]) }; //Shouldn't change for rigidly animated meshes, but will break for deforming ones where the vertices actually move.
+
+        const float4x4 prevWorldMat = gScene.getPrevWorldMatrix(instanceID);
+        const float3x3 prevWorldInvTransposeMat = getPrevInverseTransposeWorldMatrix(instanceID);
+        const bool isFrontFaceCW = isObjectFrontFaceCW(instanceID); // this probably wont change from frame to frame
+        return computeVertexData(vertices, prevWorldMat, prevWorldInvTransposeMat, isFrontFaceCW, barycentrics);
+    }
+
     /** Returns the interpolated vertex attributes for a given triangle.
         \param[in] instanceID Geometry instance ID of the mesh.
         \param[in] triangleIndex Index of the triangle in the given mesh.
@@ -513,6 +531,16 @@ struct Scene
     VertexData getVertexData(const TriangleHit hit)
     {
         return getVertexData(hit.instanceID, hit.primitiveIndex, hit.getBarycentricWeights());
+    }
+
+    /** faye: Returns the interpolated vertex attributes for a given hitpoint LAST FRAME.
+      \param[in] hit Triangle hit info.
+      \return Interpolated vertex attributes.
+  */
+    VertexData getTemporalVertexData(const TriangleHit hit)
+    {
+        StaticVertexData vertices[3];
+        return getTemporalVertexData(hit.instanceID, hit.primitiveIndex, hit.getBarycentricWeights(), vertices);
     }
 
     /** Returns the interpolated vertex attributes for a given hitpoint.

@@ -109,3 +109,44 @@ ShadingData loadShadingData(const HitInfo hit, const float3 rayOrigin, const flo
 
     return sd;
 }
+
+/**
+ * Setup ShadingData based on loaded vertex/material attributes for a hit point, LAST FRAME.
+ * @param[in] hit Hit information.
+ * @param[in] rayOrigin Ray origin (of the ray that produced this hit last frame).
+ * @param[in] rayDir Normalized ray direction (of the ray that produced this hit last frame).
+ * @return ShadingData struct.
+ */
+ShadingData loadTemporalShadingData(const HitInfo hit, const float3 rayOrigin, const float3 rayDir)
+{
+    VertexData v = {};
+    uint materialID = {};
+
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_TRIANGLE_MESH)
+    if (hit.getType() == HitType::Triangle)
+    {
+        const TriangleHit triangleHit = hit.getTriangleHit();
+        v = gScene.getTemporalVertexData(triangleHit);
+        materialID = gScene.getMaterialID(triangleHit.instanceID);
+    }
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_DISPLACED_TRIANGLE_MESH)
+
+#error "getTemporalVertexData not defined for HitType::DisplacedTriangle!"
+   
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_CURVE)
+
+#error "getTemporalVertexData not defined for HitType::Curve!"
+
+#endif
+#if SCENE_HAS_GEOMETRY_TYPE(GEOMETRY_TYPE_SDF_GRID)
+
+#error "getTemporalVertexData not defined for HitType::SDFGrid!"
+
+#endif
+
+    ShadingData sd = gScene.materials.prepareShadingData(v, materialID, -rayDir);
+
+    return sd;
+}

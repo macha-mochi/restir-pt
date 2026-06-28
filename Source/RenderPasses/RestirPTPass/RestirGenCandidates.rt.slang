@@ -100,22 +100,12 @@ struct ShadowRayData
 struct DebugData {
     uint path_length_from_cam;
     bool missed;
-
     uint curVert;
-    float3 x3_nee_mieval;
-    float3 bsdf1;
-    float3 bsdf2;
-    float3 mi_eval1;
-    float3 mi_eval2;
 
     __init() {
         path_length_from_cam = 0;
         missed = false;
         curVert = 0;
-        bsdf1 = { 0.f, 0.f, 0.f };
-        bsdf2 = { 0.f, 0.f, 0.f };
-        mi_eval1 = { 0.f, 0.f, 0.f };
-        mi_eval2 = { 0.f, 0.f, 0.f };
     }
 }
 
@@ -334,18 +324,6 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         }
         rayData.sampleData.prevSampledLobeType = rayData.sampleData.sampledLobeType;
         rayData.sampleData.sampledLobeType = bsdfSample.lobeType;
-
-        if(rayData.d.curVert == 0) {
-            // first generate scatter ray
-            rayData.d.bsdf1 = bsdfSample.weight * (rayData.nonDelta ? bsdfSample.pdf : 1.f);
-            rayData.d.curVert++;
-            rayData.d.mi_eval1 = mi.evalBSDF(sd, rayData.direction, bsdfSample.lobeType, rayData.sg);
-        }else if(rayData.d.curVert == 1) {
-            // 2nd generate
-            rayData.d.bsdf2 = bsdfSample.weight * (rayData.nonDelta ? bsdfSample.pdf : 1.f);
-            rayData.d.curVert++;
-            rayData.d.mi_eval2 = mi.evalBSDF(sd, rayData.direction, bsdfSample.lobeType, rayData.sg);
-        }
 
         return any(rayData.p_hat_thp > 0.f);
     }
@@ -722,7 +700,6 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                         // we are either in the first sampleNEE before traceScatterRay loop (x2 == nee vert) or in the first one called by handleHit (x3 == nee vert)
                         rayData.sampleData.x3_nee_wo = ls.dir;
                         rayData.sampleData.Li = ls.Li * ls.pdf; //bc Li was predivided by pdf
-                        rayData.d.x3_nee_mieval = weight;
                         //packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
                     }
                     return true;
