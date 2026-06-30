@@ -308,13 +308,13 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     var["CB"]["gFrameCount"] = mFrameCount;
     var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
     var["CB"]["gOutputDimensions"] = targetDim;
-    if (temporalVBuffer)
+    if (mpTemporalVBuffer)
     {
-        var["gTemporalVBuffer"] = temporalVBuffer;
+        var["gTemporalVBuffer"] = mpTemporalVBuffer;
     }
-    if (temporalViewDir)
+    if (mpTemporalViewDir)
     {
-        var["gTemporalViewW"] = temporalViewDir;
+        var["gTemporalViewW"] = mpTemporalViewDir;
     }
 
     var["gCandidateBuffer"] = mpReservoirBuffers[mCandidateReservoirID];
@@ -366,9 +366,9 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     //Update data for next frame
     mTemporalReservoirID = mOutputReservoirID; //ex: if output used to be 0 and temporal used to be 1, output becomes 1 and temporal becomes 0
     mOutputReservoirID = 1 - mOutputReservoirID; //ready to be re-written to
-    if (!temporalVBuffer || (temporalVBuffer->getWidth() < targetDim.x || temporalVBuffer->getHeight() < targetDim.y))
+    if (!mpTemporalVBuffer || (mpTemporalVBuffer->getWidth() < targetDim.x || mpTemporalVBuffer->getHeight() < targetDim.y))
     {
-        temporalVBuffer = mpDevice->createTexture2D(
+        mpTemporalVBuffer = mpDevice->createTexture2D(
             targetDim.x,
             targetDim.y,
             ResourceFormat::RGBA32Uint,
@@ -378,10 +378,10 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
             ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
         );
     }
-    pRenderContext->copyResource(temporalVBuffer.get(), renderData.getTexture(kInputVBuffer).get());
-    if (!temporalViewDir || (temporalViewDir->getWidth() < targetDim.x || temporalViewDir->getHeight() < targetDim.y))
+    pRenderContext->copyResource(mpTemporalVBuffer.get(), renderData.getTexture(kInputVBuffer).get());
+    if (!mpTemporalViewDir || (mpTemporalViewDir->getWidth() < targetDim.x || mpTemporalViewDir->getHeight() < targetDim.y))
     {
-        temporalViewDir = mpDevice->createTexture2D(
+        mpTemporalViewDir = mpDevice->createTexture2D(
             targetDim.x,
             targetDim.y,
             ResourceFormat::RGBA32Float,
@@ -391,7 +391,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
             ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
         );
     }
-    pRenderContext->copyResource(temporalViewDir.get(), renderData.getTexture(kInputViewDir).get());
+    pRenderContext->copyResource(mpTemporalViewDir.get(), renderData.getTexture(kInputViewDir).get());
 
     mFrameCount++;
 }
@@ -471,6 +471,13 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mUsePathViewer = false;
     mMousePixelPos = uint2(0, 0);
     resetLighting();
+    for (int i = 0; i < 3; i++)
+    {
+        mpReservoirBuffers[i] = nullptr;
+    }
+    mpTemporalVBuffer = nullptr;
+    mpTemporalViewDir = nullptr;
+    mpDiBgBuffer = nullptr;
 
     //Set the scene to the new one
     mpScene = pScene;

@@ -112,8 +112,8 @@ private:
     uint mTemporalReservoirID; //temporal = last frame
     uint mCandidateReservoirID; 
     uint mOutputReservoirID;
-    ref<Texture> temporalVBuffer; ///< Last frame's vbuffer of packedhitinfos
-    ref<Texture> temporalViewDir; ///< Last frame's view direction texture
+    ref<Texture> mpTemporalVBuffer; ///< Last frame's vbuffer of packedhitinfos
+    ref<Texture> mpTemporalViewDir; ///< Last frame's view direction texture
 
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
 
