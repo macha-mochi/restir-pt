@@ -30,12 +30,17 @@ struct Sample {
 };
 struct Reservoir
 {
-    // info needed for reservoir: the sample X, its weight W, the sum of weights W_sum, and the sample count M (capped)
+    // Information that is updated every time updateReservoir is called
     Sample X = Sample::createNull(); // the current sample
-
     float W_X = 1.f;                              // unbiased contribution weight of sample X
     float w_sum = 0; //sum of all lowercase w seen so far, for use in resampling
     uint c = 0; //cap at 20
+
+    // Information that needs to be initialized by caller in path tracing loop
+    PRNGSeed seed;
+    PRNGSeed postRCSeed;    // only used if we need to replay the path after RC, temporally
+    uint rcVertexIndex = 0; //0 is camera, 1 is primary hit, etc. This should be >= 2
+    float J; // holds denominator of jacobian calc'd from base path, so we don't have to recompute when resampling 
 
     [mutating] //Returns true if sample was replaced, false ow
     bool updateReservoir(Sample sample, float w_i_new, uint c_i, SampleGenerator sg) {

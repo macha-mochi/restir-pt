@@ -98,14 +98,12 @@ struct ShadowRayData
 };
 
 struct DebugData {
-    uint path_length_from_cam;
+    uint lastVert; //index of last vert of a path. may be on the env map or not actually a point in space
     bool missed;
-    uint curVert;
 
     __init() {
-        path_length_from_cam = 0;
+        lastVert = 0;
         missed = false;
-        curVert = 0;
     }
 }
 
@@ -139,12 +137,12 @@ struct SampleData{
  */
 struct ScatterRayData
 {
-    bool terminated;  ///< Set to true when path is terminated.
-    uint pathLength;  ///< Path length in number of path segments (0 at origin, 1 at first secondary hit, etc.). Max 2^31.
-    float3 origin;    ///< Next path segment origin.
+    bool terminated; ///< Set to true when path is terminated.
+    uint curVertex;  ///< 0 at origin, 1 at primary hit, 2 at first secondary hit, etc.). Max 2^31.
+    float3 origin;   ///< Next path segment origin.
+    float3 direction; ///< Next path segment direction.
     float3 normal;    ///< Shading normal at origin. Used for light sampling and MIS weight calculations.
     float pdf; ///< Pdf of last path segment (the one leading to the current vertex). This is needed for MIS weight calculations at the current vertex for the bsdf
-    float3 direction; ///< Next path segment direction.
 
     // added for restir
     bool lightSampledUpper; ///< (true if) Last path vertex sampled lights using NEE (in upper hemisphere).
@@ -164,7 +162,7 @@ struct ScatterRayData
     __init(SampleGenerator sg)
     {
         this.terminated = false;
-        this.pathLength = 0;
+        this.curVertex = 1; //start at 1 bc we only make this struct if it was a alid primary hit
         this.origin = float3(0, 0, 0);
         this.direction = float3(0, 0, 0);
         this.sg = sg;
@@ -565,7 +563,9 @@ float evalMIS(float n0, float p0, float n1, float p1)
  */
 void handleHit(const HitInfo hit, inout ScatterRayData rayData)
 {
-    if (rayData.pathLength == 0) { // we hit vertex x2
+    rayData.curVertex++;
+
+    if (rayData.curVertex == 2) { // we hit vertex x2
         rayData.sampleData.rcPackedHitInfo = hit.pack();
     }
 
@@ -581,7 +581,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     // Add emitted light.
     float misWeight = 1.f;
     float3 bsdf_p_hat = float3(0.f, 0.f, 0.f);
-    if (kUseEmissiveLights && (kComputeDirect || rayData.pathLength > 0))
+    if (kUseEmissiveLights && (kComputeDirect || rayData.curVertex > 2))
     {
         float3 Le = mi.getProperties(sd).emission;
         bsdf_p_hat = rayData.p_hat_thp * Le;
@@ -610,7 +610,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     rayData.sampleData.bsdf_w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf;
 
     // Check whether to terminate based on max depth.
-    if (rayData.pathLength >= kMaxBounces)
+    if (rayData.curVertex - 2 >= kMaxBounces)
     {
         rayData.terminated = true;
         return;
@@ -641,8 +641,6 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayData.terminated = true;
         return;
     }
-
-    rayData.pathLength++;
 }
 
 bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRayData rayData) {
@@ -656,8 +654,8 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
         bool validSample = false;
 
         // Setup path vertex.
-        // we use rayData.pathLength() as the vertex index
-        PathVertex vertex = PathVertex(rayData.pathLength, sd.posW, sd.faceN, sd.frontFacing);
+        // the vertex index isn't even used in the light sampling functions. used to be rayData.pathLength which is rayData.curVertex - 2 (minus 1, if it's the DI case since curVertex would still be 1 then)
+        PathVertex vertex = PathVertex(rayData.curVertex, sd.posW, sd.faceN, sd.frontFacing);
 
         // Determine if upper/lower hemispheres need to be sampled.
         bool sampleUpperHemisphere = ((lobeTypes & (uint)LobeType::NonDeltaReflection) != 0);
@@ -696,8 +694,8 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
 
                     rayData.sampleData.nee_p_hat = nee_p_hat;
                     rayData.sampleData.nee_w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf * change_in_pdf);
-                    if(rayData.pathLength == 0) {
-                        // we are either in the first sampleNEE before traceScatterRay loop (x2 == nee vert) or in the first one called by handleHit (x3 == nee vert)
+                    if(rayData.curVertex == 2) {
+                        // we are in the first one called by handleHit (x3 == nee vert)
                         rayData.sampleData.x3_nee_wo = ls.dir;
                         rayData.sampleData.Li = ls.Li * ls.pdf; //bc Li was predivided by pdf
                         //packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
@@ -819,7 +817,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     curNEESample.rcVertex.incomingRadiance = curNEESample.p_hat / pre_rc_thp;
                 }
                 if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
-                    rayData.d.path_length_from_cam = rayData.pathLength + 2;
+                    rayData.d.lastVert = rayData.curVertex + 1;
                     debugPath.length = depth + 1; //technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
                 }
             }
@@ -842,7 +840,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             curBSDFSample = Sample(rayData.sampleData.bsdf_p_hat, rayData.sampleData.bsdf_w_i, rcVertex);
             curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / pre_rc_thp;
             if (r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg)) {
-                rayData.d.path_length_from_cam = rayData.pathLength + 2;
+                rayData.d.lastVert = rayData.d.missed ? rayData.curVertex + 1 : rayData.curVertex;
                 debugPath.length = depth + 1;
             }
 
@@ -874,7 +872,7 @@ void scatterMiss(inout ScatterRayData rayData)
     rayData.d.missed = true;
 
     // Add contribution from distant light (env map) in this direction.
-    if (kUseEnvLight && (kComputeDirect || rayData.pathLength > 0))
+    if (kUseEnvLight && (kComputeDirect || rayData.curVertex > 1)) //we didn't add 1 to curVertex here like in handleHit
     {
         float3 Le = gScene.envMap.eval(WorldRayDirection());
         float3 bsdf_p_hat = rayData.p_hat_thp * Le;

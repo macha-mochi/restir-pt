@@ -125,7 +125,7 @@ RenderPassReflection RestirPTPass::reflect(const CompileData& compileData)
 void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& renderData)
 {
     // Get dimensions of ray dispatch / compute dispatch.
-    const uint2 targetDim = renderData.getDefaultTextureDims();
+    targetDim = renderData.getDefaultTextureDims();
     FALCOR_ASSERT(targetDim.x > 0 && targetDim.y > 0);
 
     auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
@@ -149,7 +149,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
             mpPathViewerPass = ComputePass::create(mpDevice, desc, defines);
         }
 
-        if (!mpDebugPathBuffer)
+        if (!mpPathDataBuffer)
         {
             std::cout << "Path Viewer: failed, path data buffer not created" << std::endl;
             return;
@@ -162,18 +162,18 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         }
 
         auto var = mpPathViewerPass->getRootVar();
-        var["gPathDataBuffer"] = mpDebugPathBuffer;
+        var["gPathDataBuffer"] = mpPathDataBuffer;
         var["gMousePixelPos"] = mMousePixelPos;
         for (auto channel : kOutputChannels)
             bind(var, channel);
         var["gViewProjMatNoJitter"] = mpScene->getCamera()->getViewProjMatrixNoJitter();
 
         uint32_t elementCount = targetDim.x * targetDim.y;
-        if (!tempBuffer || tempBuffer->getElementCount() < elementCount)
+        if (!mpPathViewerDebugBuffer || mpPathViewerDebugBuffer->getElementCount() < elementCount)
         {
-            tempBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
-            tempBuffer->setName("Restir Temp Buffer");
-            var["debugBuffer"] = tempBuffer;
+            mpPathViewerDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
+            mpPathViewerDebugBuffer->setName("Restir Path Viewer Debug Buffer");
+            var["debugBuffer"] = mpPathViewerDebugBuffer;
         }
 
         mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
@@ -286,11 +286,11 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpDiBgBuffer->setName("Restir DI_BG_Buffer");
         var["gDI_BGBuffer"] = mpDiBgBuffer;
     }
-    if (!mpDebugPathBuffer || mpDebugPathBuffer->getElementCount() < elementCount)
+    if (!mpPathDataBuffer || mpPathDataBuffer->getElementCount() < elementCount)
     {
-        mpDebugPathBuffer = mpDevice->createStructuredBuffer(var["gPathDebugBuffer"], elementCount);
-        mpDebugPathBuffer->setName("Restir Debug Path Data Buffer");
-        var["gPathDebugBuffer"] = mpDebugPathBuffer;
+        mpPathDataBuffer = mpDevice->createStructuredBuffer(var["gPathDebugBuffer"], elementCount);
+        mpPathDataBuffer->setName("Restir Debug Path Data Buffer");
+        var["gPathDebugBuffer"] = mpPathDataBuffer;
     }
 
     // Spawn the rays.
@@ -341,7 +341,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpResamplingDebugBuffer->setName("Restir Resampling Debug Buffer");
         var["debugBuffer"] = mpResamplingDebugBuffer;
     }
-    var["gPathDebugBuffer"] = mpDebugPathBuffer;
+    var["gPathDebugBuffer"] = mpPathDataBuffer;
     //Bind inputs and outputs to the compute pass
     for (auto channel : kInputChannels)
     {

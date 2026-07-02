@@ -97,6 +97,7 @@ private:
     /// Frame count since scene was loaded.
     uint mFrameCount = 0;
     bool mOptionsChanged = false;
+    uint2 targetDim = uint2(0, 0);
 
     // Raytracing program for generating new candidates. The compute passes later on don't need programs (see compute passes made by createComputePass in RTXDI.cpp). 
     struct
@@ -127,8 +128,7 @@ private:
 
     bool mUsePathViewer = false; // if true, the renderer is paused so you can click around pixels on that frame
     uint2 mMousePixelPos;
-    ref<Buffer> mpDebugPathBuffer;
+    ref<Buffer> mpPathDataBuffer;
     ref<ComputePass> mpPathViewerPass;
-
-    ref<Buffer> tempBuffer;
+    ref<Buffer> mpPathViewerDebugBuffer;
 };
