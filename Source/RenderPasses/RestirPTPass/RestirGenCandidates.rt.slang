@@ -54,6 +54,7 @@ import Rendering.Lights.EmissiveLightSampler;
 import Rendering.Lights.EmissiveLightSamplerHelpers;
 import Rendering.Lights.LightHelpers;
 import RestirReservoir;
+import RestirHelpers;
 
 cbuffer CB
 {
@@ -100,6 +101,7 @@ struct ShadowRayData
 struct DebugData {
     uint lastVert; //index of last vert of a path. may be on the env map or not actually a point in space
     bool missed;
+    bool b;
 
     __init() {
         lastVert = 0;

@@ -37,8 +37,10 @@ extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registr
 
 namespace
 {
+const char kReflectTypesShaderFile[] = "RenderPasses/RestirPTPass/ReflectTypes.cs.slang";
 const char kCandidateGenShaderFile[] = "RenderPasses/RestirPTPass/RestirGenCandidates.rt.slang";
-const char kResampleComputeShaderFile[] = "RenderPasses/RestirPTPass/Resampling.cs.slang";
+const char kSpatialComputeShaderFile[] = "RenderPasses/RestirPTPass/SpatialReuse.cs.slang";
+const char kTemporalComputeShaderFile[] = "RenderPasses/RestirPTPass/TemporalReuse.cs.slang";
 const char kPathViewerShaderFile[] = "RenderPasses/RestirPTPass/PathViewer.cs.slang";
 
 //CANDIDATE GENERATION SETTINGS
@@ -50,6 +52,7 @@ const uint32_t kMaxRecursionDepth = 2u;
 const std::string kInputVBuffer = "vbuffer";
 const std::string kInputViewDir = "viewW";
 const std::string kInputMotionVectors = "mvec";
+const std::string kOutputColor = "color";
 
 const ChannelList kInputChannels = {
     // clang-format off
@@ -61,7 +64,7 @@ const ChannelList kInputChannels = {
 
 const ChannelList kOutputChannels = {
     // clang-format off
-    { "color",          "gOutputColor", "Output color (sum of direct and indirect)", false, ResourceFormat::RGBA32Float },
+    { kOutputColor,          "outputColor", "Output color (sum of direct and indirect)", false, ResourceFormat::RGBA32Float },
     // clang-format on
 };
 
@@ -80,8 +83,8 @@ RestirPTPass::RestirPTPass(ref<Device> pDevice, const Properties& props) : Rende
     FALCOR_ASSERT(mpSampleGenerator);
 
     mOutputReservoirID = 0;
-    mTemporalReservoirID = 1;
-    mCandidateReservoirID = 2;
+    mInputReservoirID = 1;
+    mTemporalReservoirID = 2;
 }
 
 void RestirPTPass::parseProperties(const Properties& props)
@@ -128,59 +131,6 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     targetDim = renderData.getDefaultTextureDims();
     FALCOR_ASSERT(targetDim.x > 0 && targetDim.y > 0);
 
-    auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
-    {
-        if (!desc.texname.empty())
-        {
-            var[desc.texname] = renderData.getTexture(desc.name);
-        }
-    };
-    // PATH VIEWER DEBUG COMPUTE PASS
-    // Add defines, prepare vars, set constants, and bind i/o buffers
-    // don't add new defines here bc the compute pass is already set after you created it when you set the scene
-    if (mUsePathViewer)
-    {
-        if (!mpPathViewerPass)
-        {
-            DefineList defines;
-            ProgramDesc desc;
-            desc.addShaderLibrary(kPathViewerShaderFile);
-            desc.csEntry("drawPaths");
-            mpPathViewerPass = ComputePass::create(mpDevice, desc, defines);
-        }
-
-        if (!mpPathDataBuffer)
-        {
-            std::cout << "Path Viewer: failed, path data buffer not created" << std::endl;
-            return;
-        }
-
-        if (!mpScene)
-        {
-            std::cout << "Path Viewer: failed, scene not set so could not bind camera" << std::endl;
-            return;
-        }
-
-        auto var = mpPathViewerPass->getRootVar();
-        var["gPathDataBuffer"] = mpPathDataBuffer;
-        var["gMousePixelPos"] = mMousePixelPos;
-        for (auto channel : kOutputChannels)
-            bind(var, channel);
-        var["gViewProjMatNoJitter"] = mpScene->getCamera()->getViewProjMatrixNoJitter();
-
-        uint32_t elementCount = targetDim.x * targetDim.y;
-        if (!mpPathViewerDebugBuffer || mpPathViewerDebugBuffer->getElementCount() < elementCount)
-        {
-            mpPathViewerDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
-            mpPathViewerDebugBuffer->setName("Restir Path Viewer Debug Buffer");
-            var["debugBuffer"] = mpPathViewerDebugBuffer;
-        }
-
-        mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
-
-        return;
-    }
-
     // Update refresh flag if options that affect the output have changed.
     auto& dict = renderData.getDictionary();
     if (mOptionsChanged)
@@ -202,6 +152,14 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         return;
     }
 
+    // PATH VIEWER DEBUG COMPUTE PASS
+    if (mUsePathViewer)
+    {
+        PathViewerPass(pRenderContext, renderData);
+
+        return;
+    }
+
     if (is_set(mpScene->getUpdates(), IScene::UpdateFlags::RecompileNeeded) ||
         is_set(mpScene->getUpdates(), IScene::UpdateFlags::GeometryChanged))
     {
@@ -216,6 +174,18 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     {
         logWarning("Depth-of-field requires the '{}' input. Expect incorrect shading.", kInputViewDir);
     }
+
+    // Prepare resources like buffers, textures etc (not including debug buffers). we need to know the reflect types for this
+    if (!mpReflectTypes)
+    {
+        DefineList defines;
+        defines.add(mpSampleGenerator->getDefines());
+        ProgramDesc desc;
+        desc.addShaderLibrary(kReflectTypesShaderFile);
+        desc.csEntry("main");
+        mpReflectTypes = ComputePass::create(mpDevice, desc, defines);
+    }
+    prepareResources(pRenderContext, renderData);
 
     // Specialize program.
     // These defines should not modify the program vars. Do not trigger program vars re-creation.
@@ -259,32 +229,26 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpEnvMapSampler->bindShaderData(var["envMapSampler"]);
     }
 
+    auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
+    {
+        if (!desc.texname.empty())
+        {
+            var[desc.texname] = renderData.getTexture(desc.name);
+        }
+    };
     // Bind I/O buffers. These needs to be done per-frame as the buffers may change anytime.
     for (auto channel : kInputChannels)
         bind(var, channel);
 
-    // Create the reservoirs buffer here if needed since that's an output of ray gen pass
-    uint32_t elementCount = targetDim.x * targetDim.y;
+    var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];
+    var["gDI_BGBuffer"] = mpDiBgBuffer;
 
-    ref<Buffer> pCandidateBuffer = mpReservoirBuffers[mCandidateReservoirID];
-    if (!pCandidateBuffer || pCandidateBuffer->getElementCount() < elementCount)
-    {
-        pCandidateBuffer = mpDevice->createStructuredBuffer(var["gReservoirBuffer"], elementCount);
-        pCandidateBuffer->setName("Restir Candidate Reservoirs");
-        var["gReservoirBuffer"] = pCandidateBuffer;
-        mpReservoirBuffers[mCandidateReservoirID] = pCandidateBuffer;
-    }
+    uint elementCount = targetDim.x * targetDim.y;
     if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
     {
         mpCandidateGenDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
         mpCandidateGenDebugBuffer->setName("Restir Candidate Debug Buffer");
         var["debugBuffer"] = mpCandidateGenDebugBuffer;
-    }
-    if (!mpDiBgBuffer || mpDiBgBuffer->getElementCount() < elementCount)
-    {
-        mpDiBgBuffer = mpDevice->createStructuredBuffer(var["gDI_BGBuffer"], elementCount);
-        mpDiBgBuffer->setName("Restir DI_BG_Buffer");
-        var["gDI_BGBuffer"] = mpDiBgBuffer;
     }
     if (!mpPathDataBuffer || mpPathDataBuffer->getElementCount() < elementCount)
     {
@@ -296,45 +260,73 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     // Spawn the rays.
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
 
-    //SPATIOTEMPORAL RESAMPLING COMPUTE PASS
-    //Set shader vars, and bind i/o buffers
-    //don't add new defines here bc the compute pass is already set after you created it when you set the scene
-    auto program = mpSpatiotemporalResamplingPass->getProgram();
+    /*
+    
+    //Update reseroir IDs for upcoming reuse
+    mInputReservoirID = mOutputReservoirID;
+    mOutputReservoirID = 1 - mOutputReservoirID;
+
+    //SPATIOTEMPORAL RESAMPLING
+    if (mUseTemporalReuse)
+    {
+        PathReusePass(pRenderContext, renderData, true, 0);
+        mInputReservoirID = mOutputReservoirID;
+        mOutputReservoirID = 1 - mOutputReservoirID;
+    }
+    if (mUseSpatialReuse)
+    {
+        for (int i = 0; i < mNumSpatialNeighbors; i++)
+        {
+            PathReusePass(pRenderContext, renderData, false, i);
+            mInputReservoirID = mOutputReservoirID;
+            mOutputReservoirID = 1 - mOutputReservoirID;
+        }
+    }
+
+    //Update data for next frame
+    pRenderContext->copyResource(mpTemporalVBuffer.get(), renderData.getTexture(kInputVBuffer).get());
+    pRenderContext->copyResource(mpTemporalViewDir.get(), renderData.getTexture(kInputViewDir).get());
+    pRenderContext->copyResource(mpReservoirBuffers[mTemporalReservoirID].get(), mpReservoirBuffers[mOutputReservoirID].get()); //TODO potentially wasteful, mb make a function to swap the reservoir ids or smth instead
+
+    */
+
+    mFrameCount++;
+}
+
+void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal, uint spatialIndex)
+{
+    // Set shader vars, and bind i/o buffers. don't add new defines here bc the compute pass is already set after you created it when you
+    // set the scene
+    ref<ComputePass> pPass = isTemporal ? mpTemporalReusePass : mpSpatialReusePass;
+    auto program = pPass->getProgram();
     program->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
     program->addDefine("USE_SPATIAL", mUseSpatialReuse ? "1" : "0");
-    program->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0"); //we don't want to do temporal reuse if we have no temporal history yet
+    program->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0"); // no temporal reuse if no temporal history yet
 
-    var = mpSpatiotemporalResamplingPass->getRootVar();
+    auto var = isTemporal ? mpTemporalReusePass->getRootVar() : mpSpatialReusePass->getRootVar();
     var["CB"]["gFrameCount"] = mFrameCount;
+    auto& dict = renderData.getDictionary();
     var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
     var["CB"]["gOutputDimensions"] = targetDim;
-    if (mpTemporalVBuffer)
+    if (isTemporal)
     {
-        var["gTemporalVBuffer"] = mpTemporalVBuffer;
-    }
-    if (mpTemporalViewDir)
-    {
-        var["gTemporalViewW"] = mpTemporalViewDir;
+        if (mpTemporalVBuffer)
+        {
+            var["gTemporalVBuffer"] = mpTemporalVBuffer;
+        }
+        if (mpTemporalViewDir)
+        {
+            var["gTemporalViewW"] = mpTemporalViewDir;
+        }
     }
 
-    var["gCandidateBuffer"] = mpReservoirBuffers[mCandidateReservoirID];
-    ref<Buffer> pResampledBuffer = mpReservoirBuffers[mOutputReservoirID];
-    if (!pResampledBuffer || pResampledBuffer->getElementCount() < elementCount)
-    {
-        pResampledBuffer = mpDevice->createStructuredBuffer(var["gResampledBuffer"], elementCount);
-        mpReservoirBuffers[mOutputReservoirID] = pResampledBuffer;
-    }
-    pResampledBuffer->setName("Restir Resampled Reservoirs");
-    var["gResampledBuffer"] = pResampledBuffer;
-    ref<Buffer> pTemporalBuffer = mpReservoirBuffers[mTemporalReservoirID];
-    if (!pTemporalBuffer || pTemporalBuffer->getElementCount() < elementCount)
-    {
-        pTemporalBuffer = mpDevice->createStructuredBuffer(var["gTemporalBuffer"], elementCount);
-        mpReservoirBuffers[mTemporalReservoirID] = pTemporalBuffer;
-    }
-    pTemporalBuffer->setName("Restir Temporal Reservoirs");
-    var["gTemporalBuffer"] = pTemporalBuffer;
+    // We assume that the reservoir IDs have already been set to correct values before this func was called
+    var["gCandidateBuffer"] = mpReservoirBuffers[mInputReservoirID];
+    var["gResampledBuffer"] = mpReservoirBuffers[mOutputReservoirID];
+    var["gTemporalBuffer"] = mpReservoirBuffers[mTemporalReservoirID];
     var["gDI_BGBuffer"] = mpDiBgBuffer;
+
+    uint elementCount = targetDim.x * targetDim.y;
     if (!mpResamplingDebugBuffer || mpResamplingDebugBuffer->getElementCount() < elementCount)
     {
         mpResamplingDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
@@ -342,58 +334,65 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         var["debugBuffer"] = mpResamplingDebugBuffer;
     }
     var["gPathDebugBuffer"] = mpPathDataBuffer;
-    //Bind inputs and outputs to the compute pass
+
+    // Bind inputs and outputs to the compute pass
+    auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
+    {
+        if (!desc.texname.empty())
+        {
+            var[desc.texname] = renderData.getTexture(desc.name);
+        }
+    };
     for (auto channel : kInputChannels)
     {
         bind(var, channel);
     }
-    for (auto channel : kOutputChannels)
+    for (auto channel : kOutputChannels) //TODO: you technically only need to do this if its the last pass but ill just do it for now
         bind(var, channel);
-    mpScene->bindShaderData(var["gScene"]); //binds the Scene parameter block (as seen in Scene.slang w all the vertex and geometry buffers)
-    
-    //TODO execute compute passes here
-    /* uint32_t outputReservoirID = 1 - lastFrameReservoirID;
+    mpScene->bindShaderData(var["gScene"]); // binds the Scene parameter block (as seen in Scene.slang w all the vertex and geometry buffers
 
-    auto var = mpSpatiotemporalResamplingPass->getRootVar();
-    mpPixelDebug->prepareProgram(mpSpatiotemporalResamplingPass->getProgram(), var);
+    pPass->execute(pRenderContext, targetDim.x, targetDim.y);
 
-    var["CB"]["gTemporalReservoirID"] = lastFrameReservoirID;
-    var["CB"]["gInputReservoirID"] = candidateReservoirID;
-    var["CB"]["gOutputReservoirID"] = outputReservoirID;
-    bindShaderDataInternal(var, pMotionVectors); */
-    mpSpatiotemporalResamplingPass->execute(pRenderContext, targetDim.x, targetDim.y);
+}
 
-    //Update data for next frame
-    mTemporalReservoirID = mOutputReservoirID; //ex: if output used to be 0 and temporal used to be 1, output becomes 1 and temporal becomes 0
-    mOutputReservoirID = 1 - mOutputReservoirID; //ready to be re-written to
-    if (!mpTemporalVBuffer || (mpTemporalVBuffer->getWidth() < targetDim.x || mpTemporalVBuffer->getHeight() < targetDim.y))
+void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData)
+{
+    if (!mpPathViewerPass) // create the compute pass for path viewer if it doesn't exist yet
     {
-        mpTemporalVBuffer = mpDevice->createTexture2D(
-            targetDim.x,
-            targetDim.y,
-            ResourceFormat::RGBA32Uint,
-            1,
-            1,
-            nullptr,
-            ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
-        );
+        DefineList defines;
+        ProgramDesc desc;
+        desc.addShaderLibrary(kPathViewerShaderFile);
+        desc.csEntry("drawPaths");
+        mpPathViewerPass = ComputePass::create(mpDevice, desc, defines);
     }
-    pRenderContext->copyResource(mpTemporalVBuffer.get(), renderData.getTexture(kInputVBuffer).get());
-    if (!mpTemporalViewDir || (mpTemporalViewDir->getWidth() < targetDim.x || mpTemporalViewDir->getHeight() < targetDim.y))
-    {
-        mpTemporalViewDir = mpDevice->createTexture2D(
-            targetDim.x,
-            targetDim.y,
-            ResourceFormat::RGBA32Float,
-            1,
-            1,
-            nullptr,
-            ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
-        );
-    }
-    pRenderContext->copyResource(mpTemporalViewDir.get(), renderData.getTexture(kInputViewDir).get());
 
-    mFrameCount++;
+    if (!mpPathDataBuffer)
+    {
+        std::cout << "Path Viewer: failed, path data buffer not created" << std::endl;
+        return;
+    }
+
+    if (!mpScene)
+    {
+        std::cout << "Path Viewer: failed, scene not set so could not bind camera" << std::endl;
+        return;
+    }
+
+    auto var = mpPathViewerPass->getRootVar();
+    var["gPathDataBuffer"] = mpPathDataBuffer;
+    var["gMousePixelPos"] = mMousePixelPos;
+    var["gOutputColor"] = renderData.getTexture(kOutputColor);
+    var["gViewProjMatNoJitter"] = mpScene->getCamera()->getViewProjMatrixNoJitter();
+
+    uint32_t elementCount = targetDim.x * targetDim.y;
+    if (!mpPathViewerDebugBuffer || mpPathViewerDebugBuffer->getElementCount() < elementCount)
+    {
+        mpPathViewerDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
+        mpPathViewerDebugBuffer->setName("Restir Path Viewer Debug Buffer");
+        var["debugBuffer"] = mpPathViewerDebugBuffer;
+    }
+
+    mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
 }
 
 void RestirPTPass::renderUI(Gui::Widgets& widget) {
@@ -563,25 +562,21 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
             ref<ComputePass> pPass = ComputePass::create(mpDevice, desc, defines);
             return pPass;
         };
-        mpSpatiotemporalResamplingPass = createComputePass(
-            kResampleComputeShaderFile, "spatiotemporalResampling",
+        /* mpSpatialReusePass = createComputePass(
+            kSpatialComputeShaderFile, "main",
             {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)},
              {"USE_SPATIAL", mUseSpatialReuse ? "1" : "0"},
              {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
              {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"}}
         );
+        mpTemporalReusePass = createComputePass(
+            kTemporalComputeShaderFile, "main",
+            {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)},
+             {"USE_SPATIAL", mUseSpatialReuse ? "1" : "0"},
+             {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
+             {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"}}
+        );*/
     }
-}
-void RestirPTPass::resetLighting()
-{
-    // Retain the options for the emissive sampler. TODO: uncomment later when you add options for light bvh sampler
-    /* if (auto lightBVHSampler = dynamic_cast<LightBVHSampler*>(mpEmissiveSampler.get()))
-    {
-        mLightBVHOptions = lightBVHSampler->getOptions();
-    }*/
-
-    mpEmissiveSampler = nullptr;
-    mpEnvMapSampler = nullptr;
 }
 
 void RestirPTPass::prepareVars()
@@ -600,6 +595,18 @@ void RestirPTPass::prepareVars()
     // Bind utility classes into shared data.
     auto var = mTracer.pVars->getRootVar();
     mpSampleGenerator->bindShaderData(var);
+}
+
+void RestirPTPass::resetLighting()
+{
+    // Retain the options for the emissive sampler. TODO: uncomment later when you add options for light bvh sampler
+    /* if (auto lightBVHSampler = dynamic_cast<LightBVHSampler*>(mpEmissiveSampler.get()))
+    {
+        mLightBVHOptions = lightBVHSampler->getOptions();
+    }*/
+
+    mpEmissiveSampler = nullptr;
+    mpEnvMapSampler = nullptr;
 }
 
 bool RestirPTPass::prepareLighting(RenderContext* pRenderContext)
@@ -701,4 +708,53 @@ bool RestirPTPass::prepareLighting(RenderContext* pRenderContext)
     }
 
     return lightingChanged;
+}
+
+/**
+ Allocate resources like buffers, textures, etc. We only initialize resources here that are used in actual restir functionality (ie no debug data).
+*/
+void RestirPTPass::prepareResources(RenderContext* pRenderContext, const RenderData& renderData)
+{
+    uint elementCount = targetDim.x * targetDim.y;
+    auto var = mpReflectTypes->getRootVar();
+
+    ref<Buffer> pBuffer;
+    for (int i = 0; i < 3; i++)
+    {
+        pBuffer = mpReservoirBuffers[i];
+        if (!pBuffer || pBuffer->getElementCount() < elementCount)
+        {
+            pBuffer = mpDevice->createStructuredBuffer(var["reservoir"], elementCount);
+            mpReservoirBuffers[i] = pBuffer;
+        }
+    }
+    if (!mpDiBgBuffer || mpDiBgBuffer->getElementCount() < elementCount)
+    {
+        mpDiBgBuffer = mpDevice->createStructuredBuffer(var["color"], elementCount);
+        mpDiBgBuffer->setName("Restir DI_BG_Buffer");
+    }
+
+    if (!mpTemporalVBuffer || (mpTemporalVBuffer->getWidth() < targetDim.x || mpTemporalVBuffer->getHeight() < targetDim.y))
+    {
+        mpTemporalVBuffer = mpDevice->createTexture2D(
+            targetDim.x, targetDim.y,
+            ResourceFormat::RGBA32Uint,
+            1,
+            1,
+            nullptr,
+            ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
+        );
+    }
+
+    if (!mpTemporalViewDir || (mpTemporalViewDir->getWidth() < targetDim.x || mpTemporalViewDir->getHeight() < targetDim.y))
+    {
+        mpTemporalViewDir = mpDevice->createTexture2D(
+            targetDim.x, targetDim.y,
+            ResourceFormat::RGBA32Float,
+            1,
+            1,
+            nullptr,
+            ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
+        );
+    }
 }

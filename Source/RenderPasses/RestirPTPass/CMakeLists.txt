@@ -6,7 +6,11 @@ target_sources(RestirPTPass PRIVATE
     RestirGenCandidates.rt.slang
     RestirTypes.slangh
     RestirReservoir.slang
-    Resampling.cs.slang
+    RestirHelpers.slang
+    ShiftMapping.slang
+    ReflectTypes.cs.slang
+    SpatialReuse.cs.slang
+    TemporalReuse.cs.slang
     PathViewer.cs.slang
 )
 

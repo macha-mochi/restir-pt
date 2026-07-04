@@ -67,6 +67,9 @@ private:
     void prepareVars();
     void resetLighting();
     bool prepareLighting(RenderContext* pRenderContext);
+    void prepareResources(RenderContext* pRenderContext, const RenderData& renderData);
+    void PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData);
+    void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal, uint spatialIndex);
 
     // Internal state
 
@@ -108,10 +111,9 @@ private:
     } mTracer;
 
     //Resources
-    ref<Buffer> mpReservoirBuffers[3]; ///< Length 3 array containing buffers of path reservoirs: last frame's final samples, this frame's new samples, and this frame's final samples
-    ///< these will be 0, 1, or 2
-    uint mTemporalReservoirID; //temporal = last frame
-    uint mCandidateReservoirID; 
+    ref<Buffer> mpReservoirBuffers[3]; ///< Length 3 array containing buffers of path reservoirs: last frame's final samples, this frame's new / current best samples, and an output buffer to hold resampling results
+    uint mTemporalReservoirID; //temporal = last frame's final reservoirs (best samples).
+    uint mInputReservoirID; 
     uint mOutputReservoirID;
     ref<Texture> mpTemporalVBuffer; ///< Last frame's vbuffer of packedhitinfos
     ref<Texture> mpTemporalViewDir; ///< Last frame's view direction texture
@@ -119,8 +121,9 @@ private:
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
 
     //Compute passes
-    //do you need one for testing candidate visibility??
-    ref<ComputePass> mpSpatiotemporalResamplingPass; /// Spatiotemporal resampling.
+    ref<ComputePass> mpReflectTypes; /// Dummy compute pass for preparing resources of the right type
+    ref<ComputePass> mpSpatialReusePass; /// Spatial resampling.
+    ref<ComputePass> mpTemporalReusePass; /// Temporal resampling.
 
     //Debugging resources
     ref<Buffer> mpCandidateGenDebugBuffer;
