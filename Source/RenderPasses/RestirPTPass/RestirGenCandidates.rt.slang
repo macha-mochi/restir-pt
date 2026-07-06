@@ -92,6 +92,7 @@ static const bool kUseEnvBackground = USE_ENV_BACKGROUND;
 static const float3 kDefaultBackgroundColor = float3(0, 0, 0);
 static const float kRayTMax = FLT_MAX;
 static const float kShiftMappingType = SHIFT_MAPPING_TYPE;
+static const float kHybridShiftRoughnessThreshold = 0.2f; //got this value from the OG paper
 
 /**
  * Payload for shadow ray.
@@ -129,7 +130,7 @@ struct SampleData{
     float3 nee_wo;
 
     // ray footprint info (needed for hybrid shift only)
-    float dualRayFootprint; //this is for x_k
+    float dualRayFootprint; // this is for x_k
 
     __init(){
         bsdf_p_hat = {0.f, 0.f, 0.f};
@@ -158,6 +159,7 @@ struct ScatterRayData
     float3 direction; ///< Next path segment direction.
     float3 normal;    ///< Shading normal at origin. Used for light sampling and MIS weight calculations.
     float pdf; ///< Pdf of last path segment (the one leading to the current vertex). This is needed for MIS weight calculations at the current vertex for the bsdf
+    float roughness; ///< Roughness at origin, used for thresholding for hybrid shift
 
     // added for restir
     bool lightSampledUpper; ///< (true if) Last path vertex sampled lights using NEE (in upper hemisphere).
@@ -342,6 +344,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
     }
     rayData.sampleData.prevSampledLobeType = rayData.sampleData.sampledLobeType;
     rayData.sampleData.sampledLobeType = (uint)LobeType::None;
+    rayData.roughness = mi.getProperties(sd).roughness;
 
     return false;
 }
@@ -653,6 +656,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     float3 x_kMinus1 = rayData.origin;
     float kMinus1_to_k_pdf = rayData.pdf;
     float3 normalAt_kMinus1 = rayData.normal;
+    float kMinus1_roughness = rayData.roughness;
 
     // Generate scatter ray for the next path segment.
     // The raygen shader will continue the path based on the returned payload.
@@ -662,7 +666,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         return;
     }
 
-    if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
+    if (kShiftMappingType == (uint)ShiftMappingType::Hybrid && kMinus1_roughness >= kHybridShiftRoughnessThreshold) {
         float3 toX_k = sd.posW - x_kMinus1;
         float3 dirToX_k = normalize(toX_k);
         float kMinus1_k = kMinus1_to_k_pdf * abs(dot(sd.getOrientedFaceNormal(), -dirToX_k) / dot(toX_k, toX_k));
@@ -1084,17 +1088,18 @@ void rayGen()
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
     gReservoirBuffer[bufferInd] = r;
 
-    float3 color = float3(0);
-    if (r.rcVertexIndex == 0) {
-        color = float3(0.5, 0, 0);
-    } else if(r.rcVertexIndex == 2){
-        color = float3(0, 1, 0);
-    } else if(r.rcVertexIndex == 3){
-        color = float3(0, 1, 1);
-    } else if(r.rcVertexIndex == 4){
-        color = float3(0, 0, 1);
-    } else if (r.rcVertexIndex == 5) {
-        color = float3(1, 0, 1);
+    float3 color = float3(0, 0, 0);
+    if (r.rcVertexIndex != 0) {
+        if (debugBuffer[bufferInd].threshold == 0.f) {
+            color = float3(1, 1, 1);
+        } else {
+            if ((r.X.rcVertex.sampledLobeType & LobeType::Delta) != 0 && r.X.rcVertex.sampledLobeType != (uint)LobeType::All) {
+                color.x += 0.5;
+            }
+            if ((r.X.rcVertex.prevSampledLobeType & LobeType::Delta) != 0 && r.X.rcVertex.prevSampledLobeType != (uint)LobeType::All) {
+                color.y += 0.5;
+            }
+        }
     }
     outputColor[pixel] = float4(color, 1);
 }

@@ -87,7 +87,7 @@ private:
     /// Use importance sampling for materials.
     bool mUseImportanceSampling = true;
     /// Type of shift mapping used
-    ShiftMappingType mShiftMappingType = ShiftMappingType::Reconnection;
+    ShiftMappingType mShiftMappingType = ShiftMappingType::Hybrid;
     /// Whether to do spatial reuse
     bool mUseSpatialReuse = true;
     /// Number of spatial neighbors per pixel

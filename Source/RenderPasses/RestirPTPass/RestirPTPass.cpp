@@ -244,6 +244,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         bind(var, channel);
 
     var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];
+    mpReservoirBuffers[mOutputReservoirID]->setName("restir output buffer");
     var["gDI_BGBuffer"] = mpDiBgBuffer;
 
     uint elementCount = targetDim.x * targetDim.y;
