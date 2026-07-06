@@ -74,6 +74,8 @@ Texture2D<float2> gMotionVectors; // Not used in this shader
 RWStructuredBuffer<Reservoir> gReservoirBuffer;
 RWStructuredBuffer<float3> gDI_BGBuffer;
 
+RWTexture2D<float4> outputColor;
+
 //Debug buffers
 RWStructuredBuffer<DebugData> debugBuffer;
 RWStructuredBuffer<Path> gPathDebugBuffer;
@@ -89,6 +91,7 @@ static const bool kUseEnvLight = USE_ENV_LIGHT;
 static const bool kUseEnvBackground = USE_ENV_BACKGROUND;
 static const float3 kDefaultBackgroundColor = float3(0, 0, 0);
 static const float kRayTMax = FLT_MAX;
+static const float kShiftMappingType = SHIFT_MAPPING_TYPE;
 
 /**
  * Payload for shadow ray.
@@ -101,11 +104,14 @@ struct ShadowRayData
 struct DebugData {
     uint lastVert; //index of last vert of a path. may be on the env map or not actually a point in space
     bool missed;
-    bool b;
+    float footprints[5];
+    float threshold;
 
     __init() {
         lastVert = 0;
         missed = false;
+        footprints = float[5](0.f);
+        threshold = 0.f;
     }
 }
 
@@ -114,11 +120,16 @@ struct SampleData{
     float bsdf_w_i;
     float3 nee_p_hat;
     float nee_w_i;
+
+    //RC vertex info
     float3 Li;
     uint4 rcPackedHitInfo;
     uint prevSampledLobeType;
     uint sampledLobeType;
-    float3 x3_nee_wo;
+    float3 nee_wo;
+
+    // ray footprint info (needed for hybrid shift only)
+    float dualRayFootprint; //this is for x_k
 
     __init(){
         bsdf_p_hat = {0.f, 0.f, 0.f};
@@ -130,7 +141,9 @@ struct SampleData{
         rcPackedHitInfo = {0, 0, 0, 0};
         prevSampledLobeType = 0;
         sampledLobeType = 0;
-        x3_nee_wo = { 0.f, 0.f, 0.f };
+        nee_wo = { 0.f, 0.f, 0.f };
+
+        dualRayFootprint = 0.f;
     }
 }
 
@@ -636,12 +649,30 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayOrigin = sd.computeRayOrigin();
     }
 
+    // Save info for hybrid shift mapping
+    float3 x_kMinus1 = rayData.origin;
+    float kMinus1_to_k_pdf = rayData.pdf;
+    float3 normalAt_kMinus1 = rayData.normal;
+
     // Generate scatter ray for the next path segment.
     // The raygen shader will continue the path based on the returned payload.
     if (!generateScatterRay(sd, mi, isCurveHit, rayOrigin, rayData))
     {
         rayData.terminated = true;
         return;
+    }
+
+    if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
+        float3 toX_k = sd.posW - x_kMinus1;
+        float3 dirToX_k = normalize(toX_k);
+        float kMinus1_k = kMinus1_to_k_pdf * abs(dot(sd.getOrientedFaceNormal(), -dirToX_k) / dot(toX_k, toX_k));
+        float k_kMinus1 = rayData.pdf * abs(dot(normalAt_kMinus1, dirToX_k) / dot(toX_k, toX_k));
+        if (kMinus1_k == 0.f || k_kMinus1 == 0.f) {
+            rayData.sampleData.dualRayFootprint = 0.f;
+        } else {
+            rayData.sampleData.dualRayFootprint = min(1 / kMinus1_k, 1 / k_kMinus1);
+        }
+        rayData.d.footprints[rayData.curVertex-2] = rayData.sampleData.dualRayFootprint;
     }
 }
 
@@ -696,12 +727,10 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
 
                     rayData.sampleData.nee_p_hat = nee_p_hat;
                     rayData.sampleData.nee_w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf * change_in_pdf);
-                    if(rayData.curVertex == 2) {
-                        // we are in the first one called by handleHit (x3 == nee vert)
-                        rayData.sampleData.x3_nee_wo = ls.dir;
-                        rayData.sampleData.Li = ls.Li * ls.pdf; //bc Li was predivided by pdf
-                        //packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
-                    }
+                    //store the following data for the main path tracing loop
+                    rayData.sampleData.nee_wo = ls.dir;
+                    rayData.sampleData.Li = ls.Li * ls.pdf; // bc Li was predivided by pdf
+                    // packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
                     return true;
                 }
             }
@@ -779,10 +808,19 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         // Prepare ray payload.
         ScatterRayData rayData = ScatterRayData(sg);
 
-        // Initialize data carriers
+        // Initialize data carriers and information needed for hybrid shift RC
         Sample curBSDFSample = Sample::createNull();
         Sample curNEESample = Sample::createNull();
         RCVertex rcVertex = {};
+        uint rcVertexInd = kShiftMappingType == (uint)ShiftMappingType::Reconnection ? 2 : 0; //this will carry the index of earliest vertex fitting hybrid shift RC criteria, amongst bsdf sampled vertices
+        float primaryRayFootprint = 0.f;
+        if(rcVertexInd == 0){
+            // it's a hybrid shift and we should calculate the primary ray footprint
+            float3 x0_to_x1 = sd.posW - primaryRayOrigin;
+            primaryRayFootprint = dot(x0_to_x1, x0_to_x1) / abs(dot(sd.getOrientedFaceNormal(), -primaryRayDir));
+            primaryRayFootprint *= 0.02f * 4 * M_PI / 100;
+            rayData.d.threshold = primaryRayFootprint;
+        }
 
         //Create debug path data
         Path debugPath = Path(1, 0); //we can set rc index later in resampling.cs
@@ -806,21 +844,24 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         {
             // Update NEE things
             if (depth != 0) { // since we alr updated reservoir with the first nee sample
-                if (depth == 1) {
-                    // the first time this code runs it's our x3 NEESample w special case handled in rcVertex
-                    // and this time rcVertex.incomingRadiance is actually set alr
-                    RCVertex neeX2 = rcVertex;
-                    neeX2.incomingRadiance = rayData.sampleData.Li;
-                    neeX2.outgoingDir = rayData.sampleData.x3_nee_wo;
-                    neeX2.sampledLobeType = (uint)LobeType::All;
-                    curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, neeX2);
+                if (rayData.curVertex == rcVertexInd) {
+                    // Case where RC vertex is k and k+1 is a NEE light vertex needs special handling because we can't get wo or incomingRadiance from rayData fields like we can otherwise
+                    RCVertex neeX_kMinus1 = rcVertex;
+                    neeX_kMinus1.incomingRadiance = rayData.sampleData.Li;
+                    neeX_kMinus1.outgoingDir = rayData.sampleData.nee_wo;
+                    neeX_kMinus1.sampledLobeType = (uint)LobeType::All;
+                    curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, neeX_kMinus1);
                 } else {
                     curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex);
                     curNEESample.rcVertex.incomingRadiance = curNEESample.p_hat / pre_rc_thp;
                 }
                 if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
+                    //if we have not yet selected a rc vertex, implicitly this means we are in HYBRID mode, so we force reconnection to the light vertex
+                    r.rcVertexIndex = rcVertexInd == 0 ? rayData.curVertex + 1 : rcVertexInd;
+
                     rayData.d.lastVert = rayData.curVertex + 1;
-                    debugPath.length = depth + 1; //technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
+                    debugPath.length = depth + 1; // technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
+                    debugPath.rcIndex = r.rcVertexIndex;
                 }
             }
             rayData.sampleData.nee_p_hat = { 0.f, 0.f, 0.f };
@@ -829,7 +870,16 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             traceScatterRay(rayData);
-            if (depth == 0) { // this is for the first indirect bounce
+
+            // check if this vertex can be the rc vertex
+            if (rcVertexInd == 0) {
+                //we have not yet selected a rc vertex, implicitly this means we are in HYBRID mode
+                if (rayData.sampleData.dualRayFootprint >= primaryRayFootprint) {
+                    rcVertexInd = rayData.curVertex;
+                }
+            }
+
+            if (rayData.curVertex == rcVertexInd) {
                 pre_rc_thp = rayData.p_hat_thp;
                 if (!rayData.terminated) {
                     // if kmaxbounces was 0 or we hit env map or scatter ray failed, would terminate here and we clear rc vertex since it'd be length 2 BSDF path
@@ -842,8 +892,11 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             curBSDFSample = Sample(rayData.sampleData.bsdf_p_hat, rayData.sampleData.bsdf_w_i, rcVertex);
             curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / pre_rc_thp;
             if (r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg)) {
+                r.rcVertexIndex = rcVertexInd;
+
                 rayData.d.lastVert = rayData.d.missed ? rayData.curVertex + 1 : rayData.curVertex;
                 debugPath.length = depth + 1;
+                debugPath.rcIndex = r.rcVertexIndex;
             }
 
             debugBuffer[bufferInd] = rayData.d;
@@ -1030,4 +1083,18 @@ void rayGen()
 
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
     gReservoirBuffer[bufferInd] = r;
+
+    float3 color = float3(0);
+    if (r.rcVertexIndex == 0) {
+        color = float3(0.5, 0, 0);
+    } else if(r.rcVertexIndex == 2){
+        color = float3(0, 1, 0);
+    } else if(r.rcVertexIndex == 3){
+        color = float3(0, 1, 1);
+    } else if(r.rcVertexIndex == 4){
+        color = float3(0, 0, 1);
+    } else if (r.rcVertexIndex == 5) {
+        color = float3(1, 0, 1);
+    }
+    outputColor[pixel] = float4(color, 1);
 }

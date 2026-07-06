@@ -201,11 +201,12 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     {
         mTracer.pProgram->addDefines(mpEmissiveSampler->getDefines());
     }
+    mTracer.pProgram->addDefine("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
 
     // For optional I/O resources, set 'is_valid_<name>' defines to inform the program of which ones it can access.
     // TODO: This should be moved to a more general mechanism using Slang.
     mTracer.pProgram->addDefines(getValidResourceDefines(kInputChannels, renderData));
-    //mTracer.pProgram->addDefines(getValidResourceDefines(kOutputChannels, renderData)); //it doesn't need this bc the tracer is not the one outputting final color
+    mTracer.pProgram->addDefines(getValidResourceDefines(kOutputChannels, renderData)); //it doesn't need this bc the tracer is not the one outputting final color
 
     // Prepare program vars. This may trigger shader compilation.
     // The program should have all necessary defines set at this point.
@@ -238,6 +239,8 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     };
     // Bind I/O buffers. These needs to be done per-frame as the buffers may change anytime.
     for (auto channel : kInputChannels)
+        bind(var, channel);
+    for (auto channel : kOutputChannels)
         bind(var, channel);
 
     var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];

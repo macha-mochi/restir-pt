@@ -8,8 +8,6 @@ bool performReconnectionShift(uint2 srcPixel, bool temporalSrc, uint2 dstPixel, 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
     const float3 temporalPrimaryRayOrigin = gScene.camera.data.prevPosW;
 
-    uint srcBufferInd = ind(srcPixel);
-
     const HitInfo srcHit = temporalSrc ? HitInfo(gTemporalVBuffer[srcPixel]) : HitInfo(gVBuffer[srcPixel]); //TODO: can probably replace this by just passing in the info for x(k-1) if x(k) is rc vert
     const HitInfo dstHit = temporalDst ? HitInfo(gTemporalVBuffer[dstPixel]) : HitInfo(gVBuffer[dstPixel]);
     if (srcHit.isValid() && dstHit.isValid())
@@ -32,7 +30,7 @@ bool performReconnectionShift(uint2 srcPixel, bool temporalSrc, uint2 dstPixel, 
         let lod1 = ExplicitLodTextureSampler(0.f);
         let dstMI1 = gScene.materials.getMaterialInstance(dstSD, lod1);
 
-        RCVertex rcVertex = X.rcVertex; //gCandidateBuffer[srcBufferInd].X.rcVertex;
+        RCVertex rcVertex = X.rcVertex;
         HitInfo rcHitInfo = HitInfo(rcVertex.packedHitInfo);
         if (!rcHitInfo.isValid()) { // TODO: should have another condition here. used to be X.thp_denom == 0 as in path ended before x2 but lk incoming radiance would be good check
             return false; // can't do shift if x2 isn't valid
