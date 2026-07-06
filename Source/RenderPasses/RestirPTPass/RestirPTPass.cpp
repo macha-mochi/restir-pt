@@ -471,6 +471,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mTracer.pVars = nullptr;
     mFrameCount = 0;
     mUsePathViewer = false;
+    mpPathDataBuffer = nullptr;
     mMousePixelPos = uint2(0, 0);
     resetLighting();
     for (int i = 0; i < 3; i++)
@@ -480,6 +481,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mpTemporalVBuffer = nullptr;
     mpTemporalViewDir = nullptr;
     mpDiBgBuffer = nullptr;
+    
 
     //Set the scene to the new one
     mpScene = pScene;
