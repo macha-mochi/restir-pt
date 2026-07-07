@@ -55,6 +55,7 @@ import Rendering.Lights.EmissiveLightSamplerHelpers;
 import Rendering.Lights.LightHelpers;
 import RestirReservoir;
 import RestirHelpers;
+import PathState;
 
 cbuffer CB
 {
@@ -107,6 +108,8 @@ struct DebugData {
     bool missed;
     float footprints[5];
     float threshold;
+    uint finalSamplePathFlags;
+    uint rcVertIndInLoop;
 
     __init() {
         lastVert = 0;
@@ -121,6 +124,7 @@ struct SampleData{
     float bsdf_w_i;
     float3 nee_p_hat;
     float nee_w_i;
+    float j_denom;
 
     //RC vertex info
     float3 Li;
@@ -129,7 +133,9 @@ struct SampleData{
     uint sampledLobeType;
     float3 nee_wo;
 
-    // ray footprint info (needed for hybrid shift only)
+    // hybrid shift jacobian / rc vertex criteria info
+    float nee_pdf; // needed for jacobian denom calculation
+    float nee_g; // also needed for jacobian denom calc
     float dualRayFootprint; // this is for x_k
 
     __init(){
@@ -137,6 +143,7 @@ struct SampleData{
         bsdf_w_i = 0.f;
         nee_p_hat = {0.f, 0.f, 0.f};
         nee_w_i = 0.f;
+        j_denom = 0.f;
 
         Li = { 0.f, 0.f, 0.f };
         rcPackedHitInfo = {0, 0, 0, 0};
@@ -144,6 +151,8 @@ struct SampleData{
         sampledLobeType = 0;
         nee_wo = { 0.f, 0.f, 0.f };
 
+        nee_pdf = 0.f;
+        nee_g = 0.f;
         dualRayFootprint = 0.f;
     }
 }
@@ -153,20 +162,17 @@ struct SampleData{
  */
 struct ScatterRayData
 {
-    bool terminated; ///< Set to true when path is terminated.
-    uint curVertex;  ///< 0 at origin, 1 at primary hit, 2 at first secondary hit, etc.). Max 2^31.
-    float3 origin;   ///< Next path segment origin.
+    PathState flags; //1 uint
+
+    uint curVertex;   ///< 0 at origin, 1 at primary hit, 2 at first secondary hit, etc.). Max 2^31.
+    float3 origin;    ///< Next path segment origin.
     float3 direction; ///< Next path segment direction.
     float3 normal;    ///< Shading normal at origin. Used for light sampling and MIS weight calculations.
     float pdf; ///< Pdf of last path segment (the one leading to the current vertex). This is needed for MIS weight calculations at the current vertex for the bsdf
-    float roughness; ///< Roughness at origin, used for thresholding for hybrid shift
 
-    // added for restir
-    bool lightSampledUpper; ///< (true if) Last path vertex sampled lights using NEE (in upper hemisphere).
-    bool lightSampledLower; ///< (true if) Last path vertex sampled lights using NEE (in lower hemisphere).
-    bool nonDelta; ///< (true if) bsdf sampled at last path vertex is nondelta
-    float3 p_hat_thp;                   // Throughput for the p_hat calculations. doesn't include pdf, only bsdf * geo term
-    float path_pdf;                        ///< Current path pdf (just multiplying) in terms of solid angle (changed from area)
+    float roughness;  ///< Roughness at origin, used for thresholding for hybrid shift
+    float3 p_hat_thp; // Throughput for the p_hat calculations. doesn't include pdf, only bsdf * geo term
+    float path_pdf;   ///< Current path pdf (just multiplying) in terms of solid angle (changed from area)
     SampleData sampleData;
 
     SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
@@ -178,7 +184,7 @@ struct ScatterRayData
      */
     __init(SampleGenerator sg)
     {
-        this.terminated = false;
+        //don't set flags to {}, will zero it
         this.curVertex = 1; //start at 1 bc we only make this struct if it was a alid primary hit
         this.origin = float3(0, 0, 0);
         this.direction = float3(0, 0, 0);
@@ -186,8 +192,6 @@ struct ScatterRayData
 
         this.p_hat_thp = float3(1, 1, 1);
         this.path_pdf = 1.f;
-        this.lightSampledUpper = false;
-        this.lightSampledLower = false;
         this.normal = float3(0, 0, 0);
         this.sampleData = {};
 
@@ -322,7 +326,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         rayData.origin = rayOrigin;
         rayData.normal = sd.getOrientedFaceNormal();
         rayData.pdf = bsdfSample.pdf;
-        rayData.nonDelta = bsdfSample.isLobe(LobeType::NonDelta);
+        rayData.flags.setDelta(bsdfSample.isLobe(LobeType::Delta));
         if (!isCurveHit && bsdfSample.isLobe(LobeType::Transmission))
         {
             rayData.origin = sd.computeRayOrigin(false);
@@ -333,7 +337,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         // bsdfsample.weight = f * dot(wo, n) / pdf
         // wo is normalized in world space
         rayData.p_hat_thp *= bsdfSample.weight;
-        if (rayData.nonDelta) {
+        if (rayData.flags.nonDelta()) {
             rayData.p_hat_thp *= bsdfSample.pdf;
             rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
         }
@@ -604,7 +608,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         float3 Le = mi.getProperties(sd).emission;
         bsdf_p_hat = rayData.p_hat_thp * Le;
 
-        if (any(Le > 0.f) && rayData.nonDelta) { // if emission was non zero, and the last bsdf hit wasn't delta, this is where you calculate mis weight for bsdf sampling
+        if (any(Le > 0.f) && rayData.flags.nonDelta()) { // if emission was non zero, and the last bsdf hit wasn't delta, this is where you calculate mis weight for bsdf sampling
             //assume that we hit an emissive triangle and this is not the primary hit
 
             // Prepare hit point struct with data needed for emissive light PDF evaluation.
@@ -615,7 +619,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
             lightHit.normalW = sd.getOrientedFaceNormal();
 
             // Evaluate PDF at the hit, had it been generated with light sampling.
-            bool upperHemisphere = rayData.lightSampledUpper && !rayData.lightSampledLower; // Emissive light samplers have an option to exclusively sample the upper hemisphere
+            bool upperHemisphere = rayData.flags.isLightSampledUpper() && !rayData.flags.isLightSampledLower(); // Emissive light samplers have an option to exclusively sample the upper hemisphere
             float lightPdf = getEmissiveSelectionProbability() * emissiveSampler.evalPdf(rayData.origin, rayData.normal, upperHemisphere, lightHit);
 
             // Compute MIS weight by combining this with BSDF sampling.
@@ -630,13 +634,12 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     // Check whether to terminate based on max depth.
     if (rayData.curVertex - 2 >= kMaxBounces)
     {
-        rayData.terminated = true;
+        rayData.flags.terminate();
         return;
     }
 
     // Update things for NEE, or if we don't end up doing it bc our path ends
-    rayData.lightSampledUpper = false;
-    rayData.lightSampledLower = false;
+    rayData.flags.setLightSampled(false, false);
     // This should be where you add NEE. but if we're processing kth hit rn, this NEE is for the (k+1)th vertex to be on a light.
     bool neeSampled = sampleNEE(sd, mi, rayData); // populates nextNEESample. bc the thp of the ray changes in generateScatterRay, we have to do this before even if the ray might fail
 
@@ -658,11 +661,17 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     float3 normalAt_kMinus1 = rayData.normal;
     float kMinus1_roughness = rayData.roughness;
 
+    if(kShiftMappingType == (uint)ShiftMappingType::Reconnection && rayData.curVertex == 2){
+        // jacobian is a ratio of just the geometry terms
+        float3 x1_to_x2 = sd.posW - x_kMinus1;
+        rayData.sampleData.j_denom = abs(dot(sd.getOrientedFaceNormal(), -rayData.direction)) / dot(x1_to_x2, x1_to_x2); //rayData.dir is from x1 to x2
+    }
+
     // Generate scatter ray for the next path segment.
     // The raygen shader will continue the path based on the returned payload.
     if (!generateScatterRay(sd, mi, isCurveHit, rayOrigin, rayData))
     {
-        rayData.terminated = true;
+        rayData.flags.terminate();
         return;
     }
 
@@ -676,7 +685,12 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         } else {
             rayData.sampleData.dualRayFootprint = min(1 / kMinus1_k, 1 / k_kMinus1);
         }
-        rayData.d.footprints[rayData.curVertex-2] = rayData.sampleData.dualRayFootprint;
+
+        // also record data for the jacobian denom of the hybrid shift
+        rayData.sampleData.j_denom = kMinus1_k; // p of going from x_(k-1) to x_k * geometry term of doing that.
+        //pdf of going from x_k to x_(k+1) will be multiplied in main path loop since rayDAta.pdf is easily accessible there + we need to handle NEE differently
+    } else {
+        rayData.sampleData.dualRayFootprint = 0.f;
     }
 }
 
@@ -700,8 +714,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
 
         // Sample a light.
         validSample = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, rayData.sg, ls);
-        rayData.lightSampledUpper = sampleUpperHemisphere;
-        rayData.lightSampledLower = sampleLowerHemisphere;
+        rayData.flags.setLightSampled(sampleUpperHemisphere, sampleLowerHemisphere);
         if (validSample)
         {
             // Apply MIS weight.
@@ -735,6 +748,23 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                     rayData.sampleData.nee_wo = ls.dir;
                     rayData.sampleData.Li = ls.Li * ls.pdf; // bc Li was predivided by pdf
                     // packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
+                    rayData.sampleData.nee_pdf = ls.pdf;
+                    rayData.sampleData.nee_g = ls.g;
+
+                    switch (ls.lightType) {
+                        case (uint)NEELightType::Analytic:
+                            rayData.flags.setSampleType(PathFlags::neeSampled, PathFlags::sampledAnalytic);
+                            break;
+                        case (uint)NEELightType::Emissive:
+                            rayData.flags.setSampleType(PathFlags::neeSampled, PathFlags::sampledEmissive);
+                            break;
+                        case (uint)NEELightType::EnvMap:
+                            rayData.flags.setSampleType(PathFlags::neeSampled, PathFlags::sampledEnvMap);
+                            break;
+                        default:
+                            break;
+                    }
+                        
                     return true;
                 }
             }
@@ -835,16 +865,15 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         sampleNEE(sd, mi, rayData);
         curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex); //rcvertex is invalid for this vert bc length 2 paths are invalid
         r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg);
-        debugBuffer[bufferInd] = rayData.d;
 
         // Generate scatter ray.
         if (!generateScatterRay(sd, mi, isCurveHit, rayOrigin, rayData))
-            rayData.terminated = true;
+            rayData.flags.terminate();
 
         float3 pre_rc_thp;
         // Follow path into the scene and compute its total contribution.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene. so path length > 0 by now
-        for (uint depth = 0; depth <= kMaxBounces && !rayData.terminated; depth++)
+        for (uint depth = 0; depth <= kMaxBounces && !rayData.flags.isTerminated(); depth++)
         {
             // Update NEE things
             if (depth != 0) { // since we alr updated reservoir with the first nee sample
@@ -860,10 +889,25 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     curNEESample.rcVertex.incomingRadiance = curNEESample.p_hat / pre_rc_thp;
                 }
                 if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
-                    //if we have not yet selected a rc vertex, implicitly this means we are in HYBRID mode, so we force reconnection to the light vertex
-                    r.rcVertexIndex = rcVertexInd == 0 ? rayData.curVertex + 1 : rcVertexInd;
+                    //if we have not yet selected a rc vertex, implicitly this means we are in HYBRID mode, so we force reconnection to the light vertex. k = d case
+                    if(rcVertexInd == 0){
+                        r.rcVertexIndex = rayData.curVertex + 1;
+                        // TODO / CAUTION: figure out a better way to handle this, pass info needed to re-eval the light into resampling shader.
+                        // for now we'll just have paths that couldn't find a good RC vertex before their nee vertex be unshiftable
+                        r.X.rcVertex.prevSampledLobeType = (uint)LobeType::All; //and do this to flag that this is a case where we didn't find a good rc vert until litr the last one
+                        r.X.rcVertex.sampledLobeType = (uint)LobeType::All;
+                        r.J = rayData.sampleData.nee_pdf * rayData.sampleData.nee_g; //this is handled the way the restir enhanced paper says to. p of x_(k-1) to k is just pdf of choosing x_k light vertex, we don't include p of x_k to x_(k+1) bc x_(k+1) doesn't exist
+                    } else {
+                        r.rcVertexIndex = rcVertexInd;
+                        if(rayData.curVertex == rcVertexInd){ //k = d-1 case
+                            r.J = rayData.sampleData.j_denom * rayData.sampleData.nee_pdf; //we use pdf of nee in solid angle for p(k to k+1)
+                        } else {
+                            r.J = rayData.sampleData.j_denom * rayData.pdf; //normal case
+                        }
+                    }
 
                     rayData.d.lastVert = rayData.curVertex + 1;
+                    rayData.d.finalSamplePathFlags = rayData.flags.flags; //should be set for nee alr
                     debugPath.length = depth + 1; // technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
                     debugPath.rcIndex = r.rcVertexIndex;
                 }
@@ -880,12 +924,13 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 //we have not yet selected a rc vertex, implicitly this means we are in HYBRID mode
                 if (rayData.sampleData.dualRayFootprint >= primaryRayFootprint) {
                     rcVertexInd = rayData.curVertex;
+                    rayData.d.footprints[rayData.curVertex - 2] = rayData.sampleData.dualRayFootprint;
                 }
             }
 
             if (rayData.curVertex == rcVertexInd) {
                 pre_rc_thp = rayData.p_hat_thp;
-                if (!rayData.terminated) {
+                if (!rayData.flags.isTerminated()) {
                     // if kmaxbounces was 0 or we hit env map or scatter ray failed, would terminate here and we clear rc vertex since it'd be length 2 BSDF path
                     // otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path. only case not covered would be an NEE length 2 path
                     // if gen scatter ray succeeded, rayData.direction is dir from x2 to x3
@@ -896,18 +941,30 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             curBSDFSample = Sample(rayData.sampleData.bsdf_p_hat, rayData.sampleData.bsdf_w_i, rcVertex);
             curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / pre_rc_thp;
             if (r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg)) {
-                r.rcVertexIndex = rcVertexInd;
+                if(rayData.d.missed) {
+                    // we hit the environment map
+                    r.rcVertexIndex = rcVertexInd == 0 ? rayData.curVertex + 1 : rcVertexInd;
+                } else {
+                    r.rcVertexIndex = rcVertexInd == 0 ? rayData.curVertex : rcVertexInd; //if this sample went thru it must have hit a light so we can set last vert as rc vert
+                }
+                r.J = rayData.sampleData.j_denom * rayData.pdf;
 
                 rayData.d.lastVert = rayData.d.missed ? rayData.curVertex + 1 : rayData.curVertex;
+                if (rayData.d.missed) {
+                    rayData.d.finalSamplePathFlags = { (uint)(PathFlags::bsdfSampled | PathFlags::sampledEnvMap) };
+                } else {
+                    rayData.d.finalSamplePathFlags = { (uint)(PathFlags::bsdfSampled | PathFlags::sampledEmissive) };
+                }
                 debugPath.length = depth + 1;
                 debugPath.rcIndex = r.rcVertexIndex;
             }
 
-            debugBuffer[bufferInd] = rayData.d;
-            if (!rayData.terminated) {
+            if (!rayData.flags.isTerminated()) {
                 debugPath.vertices[depth + 1] = rayData.origin;
             }
         }
+        rayData.d.rcVertIndInLoop = rcVertexInd;
+        debugBuffer[bufferInd] = rayData.d;
         gPathDebugBuffer[bufferInd] = debugPath;
     }
     else
@@ -927,7 +984,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 void scatterMiss(inout ScatterRayData rayData)
 {
     // Ray missed the scene. Mark the ray as terminated.
-    rayData.terminated = true;
+    rayData.flags.terminate();
     rayData.d.missed = true;
 
     // Add contribution from distant light (env map) in this direction.
@@ -937,7 +994,7 @@ void scatterMiss(inout ScatterRayData rayData)
         float3 bsdf_p_hat = rayData.p_hat_thp * Le;
 
         float misWeight = 1.f;
-        if (any(Le > 0.f) && rayData.nonDelta) { // if emission was non zero, and the last bsdf hit wasn't delta, this is where you calculate mis weight for bsdf sampling
+        if (any(Le > 0.f) && rayData.flags.nonDelta()) { // if emission was non zero, and the last bsdf hit wasn't delta, this is where you calculate mis weight for bsdf sampling
             float lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(rayData.direction);
 
             // Compute MIS weight by combining this with BSDF sampling.
@@ -1089,17 +1146,14 @@ void rayGen()
     gReservoirBuffer[bufferInd] = r;
 
     float3 color = float3(0, 0, 0);
-    if (r.rcVertexIndex != 0) {
-        if (debugBuffer[bufferInd].threshold == 0.f) {
-            color = float3(1, 1, 1);
-        } else {
-            if ((r.X.rcVertex.sampledLobeType & LobeType::Delta) != 0 && r.X.rcVertex.sampledLobeType != (uint)LobeType::All) {
-                color.x += 0.5;
-            }
-            if ((r.X.rcVertex.prevSampledLobeType & LobeType::Delta) != 0 && r.X.rcVertex.prevSampledLobeType != (uint)LobeType::All) {
-                color.y += 0.5;
-            }
-        }
+    if (r.rcVertexIndex == 2) {
+        color.x = 1;
+    } else if(r.rcVertexIndex == 3) {
+        color.y = 1;
+    } else if (r.rcVertexIndex == 4) {
+        color.z = 1;
+    } else if (r.rcVertexIndex == 5) {
+        color = float3(1, 0, 1);
     }
     outputColor[pixel] = float4(color, 1);
 }
