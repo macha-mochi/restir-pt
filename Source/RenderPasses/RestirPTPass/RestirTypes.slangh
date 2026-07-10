@@ -20,6 +20,7 @@ FALCOR_ENUM_REGISTER(ShiftMappingType);
 struct RCVertex
 {
     float3 outgoingDir; // outgoing w_o from reconnection vert x_k
+    float outgoingPdf; // pdf of sampling outgoingDir
     float3 incomingRadiance; // L incoming at x_k, along rcOutgoingDir
     uint4 packedHitInfo; ///< Packed hit info for reconnection vertex
     uint prevSampledLobeType; //will be a LobeType uint, representing which lobe type got sampled for vert x_(k-1)
@@ -28,14 +29,16 @@ struct RCVertex
     #ifndef HOST_CODE
     __init(){
         outgoingDir = {0.f, 0.f, 0.f};
+        outgoingPdf = 0.f;
         incomingRadiance = {0.f, 0.f, 0.f};
         packedHitInfo = {0, 0, 0, 0};
         prevSampledLobeType = 0;
         sampledLobeType = 0;
     }
 
-    __init(float3 wo, float3 Li, uint4 packedHit, uint prevLobeType, uint curLobeType){
+    __init(float3 wo, float pdf, float3 Li, uint4 packedHit, uint prevLobeType, uint curLobeType){
         outgoingDir = wo;
+        outgoingPdf = pdf;
         incomingRadiance = Li;
         packedHitInfo = packedHit;
         prevSampledLobeType = prevLobeType;
@@ -74,7 +77,7 @@ struct PRNGSeed
     uint sampleNumber;
 
     #ifndef HOST_CODE
-    
+
     __init(uint2 pix, uint sampleNum){
         pixel = pix;
         sampleNumber = sampleNum;
@@ -84,18 +87,18 @@ struct PRNGSeed
 };
 
 /**
- Describes a Path as a sequence of vertices, used by the PathViewer
+ Describes a path as a sequence of vertices, used by the PathViewer
 */
-struct Path
+struct PathViewerPath
 {
-    uint length; // the same as the index of the last vertex on this path
+    uint numNonCameraVertices; // the same as the index of the last vertex on this path
     uint rcIndex; // ex for reconnection shift this will be 2
     float3 vertices[5]; // starts at x1, then x2, x3, etc since camera pos is determined. these are the ray origins NOT sd.posW
 
     #ifndef HOST_CODE
     
-    __init(uint len, uint rci){
-        length = len;
+    __init(uint numVerts, uint rci){
+        numNonCameraVertices = numVerts;
         rcIndex = rci;
         for(int i = 0; i < 5; i++){
             vertices[i] = float3(0.f);

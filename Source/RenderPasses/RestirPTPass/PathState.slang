@@ -22,15 +22,23 @@ enum class PathFlags
     // Other bits unused (leaves space for more path flags).
 };
 
+// Be careful with changing these. PathFlags share 32-bit uint with vertexIndex. For now, we keep 10 bits for vertexIndex.
+// PathFlags take higher bits, VertexIndex takes lower bits.
+static const uint kVertexIndexBitCount = 10u;
+static const uint kVertexIndexBitMask = (1u << kVertexIndexBitCount) - 1u;
+static const uint kPathFlagsBitCount = 32u - kVertexIndexBitCount;
+static const uint kPathFlagsBitMask = ((1u << kPathFlagsBitCount) - 1u) << kVertexIndexBitCount;
+
 struct PathState {
-    uint flags; ///< PathFlags ORd together
+    uint flagsAndVertexIndex; ///< PathFlags ORd together
 
     __init() {
-        flags = (uint)PathFlags::active;
+        flagsAndVertexIndex = 0;
     }
 
-    __init(uint _f) {
-        flags = _f; //assumes _f is a valid combination of OR'd path flags
+    // Assumes that [data] is valid
+    __init(uint data) {
+        flagsAndVertexIndex = data;
     }
 
     bool isTerminated() { return !isActive(); }
@@ -61,26 +69,42 @@ struct PathState {
     [mutating] void setLightSampled(bool upper, bool lower) { setFlag(PathFlags::lightSampledUpper, upper); setFlag(PathFlags::lightSampledLower, lower); }
     [mutating] void setSampleType(PathFlags technique, PathFlags lightType) //sets the corresponding flags to true and all others to false
     {
-        const uint bits = uint(technique | lightType);
+        const uint bits = uint(technique | lightType) << kVertexIndexBitCount;
         clearSampleTechniqueAndLightTypes();
-        flags |= bits;
+        flagsAndVertexIndex |= bits;
     }
     [mutating] void clearSampleTechniqueAndLightTypes() {
-        uint bits = uint(PathFlags::bsdfSampled | PathFlags::neeSampled | PathFlags::sampledAnalytic | PathFlags::sampledEmissive | PathFlags::sampledEnvMap);
-        flags &= ~bits;
+        uint bits = uint(PathFlags::bsdfSampled | PathFlags::neeSampled | PathFlags::sampledAnalytic | PathFlags::sampledEmissive | PathFlags::sampledEnvMap) << kVertexIndexBitCount;
+        flagsAndVertexIndex &= ~bits;
     }
 
     bool hasFlag(PathFlags flag)
     {
-        const uint bit = uint(flag);
-        return (flags & bit) != 0;
+        const uint bit = uint(flag) << kVertexIndexBitCount;
+        return (flagsAndVertexIndex & bit) != 0;
     }
 
     [mutating] void setFlag(PathFlags flag, bool value = true)
     {
-        const uint bit = uint(flag);
-        if (value) flags |= bit;
-        else flags &= ~bit;
+        const uint bit = uint(flag) << kVertexIndexBitCount;
+        if (value) flagsAndVertexIndex |= bit;
+        else flagsAndVertexIndex &= ~bit;
     }
+
+    // Unsafe - assumes that index is small enough.
+    [mutating] void setVertexIndex(uint index)
+    {
+        // Clear old vertex index.
+        flagsAndVertexIndex &= kPathFlagsBitMask;
+        // Set new vertex index (unsafe).
+        flagsAndVertexIndex |= index;
+    }
+
+    uint getVertexIndex() { return flagsAndVertexIndex & kVertexIndexBitMask; }
+
+    // Unsafe - assumes that vertex index never overflows.
+    [mutating] void incrementVertexIndex() { flagsAndVertexIndex += 1; }
+    // Unsafe - assumes that vertex index will never be decremented below zero.
+    [mutating] void decrementVertexIndex() { flagsAndVertexIndex -= 1; }
 }
 

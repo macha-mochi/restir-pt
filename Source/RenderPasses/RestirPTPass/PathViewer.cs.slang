@@ -4,7 +4,7 @@ import Utils.Math.MathHelpers;
 import Scene.Camera.CameraData;
 
 // Inputs
-StructuredBuffer<Path> gPathDataBuffer;
+StructuredBuffer<PathViewerPath> gPathDataBuffer;
 uniform uint2 gMousePixelPos;
 uniform float4x4 gViewProjMatNoJitter;
 uniform float3 testPoint;
@@ -66,7 +66,7 @@ void drawPaths(uint3 threadID: SV_DispatchThreadID) {
     uint pixelInd = pixel.y * dims.x + pixel.x;
 
     DebugData d = {};
-    for (int i = 0; i < gPathDataBuffer[mouseBufferInd].length - 1; i++) {
+    for (int i = 0; i < gPathDataBuffer[mouseBufferInd].numNonCameraVertices - 1; i++) {
         uint2 p0 = worldToScreen(gPathDataBuffer[mouseBufferInd].vertices[i], dims);
         uint2 p1 = worldToScreen(gPathDataBuffer[mouseBufferInd].vertices[i + 1], dims);
         float dist = distanceToSegment(pixel, p0, p1);

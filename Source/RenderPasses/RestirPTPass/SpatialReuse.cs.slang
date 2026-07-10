@@ -28,40 +28,6 @@ uint ind(uint2 pixel) {
     return pixel.y * gOutputDimensions.x + pixel.x;
 }
 
-/**
- * Traces a shadow ray towards a light source.
- * @param[in] origin Ray origin for the shadow ray.
- * @param[in] dir Direction from shading point towards the light source (normalized).
- * @param[in] distance Distance to the light source.
- * @return True if light is visible, false otherwise.
- */
-bool traceShadowRay(float3 origin, float3 dir, float distance) {
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = dir;
-    ray.TMin = 0.f;
-    ray.TMax = distance;
-
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
-    let rayFlags = RAY_FLAG_NONE; // gets OR'd with the flag passed into rayquery generic
-
-    q.TraceRayInline(gScene.rtAccel, rayFlags, 0xff /* instance inclusion mask */, ray);
-
-    q.Proceed();
-    if (q.CommittedStatus() == COMMITTED_NOTHING) {
-        return true;
-    } else {
-        /*if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-            TriangleHit triangleHit;
-            triangleHit.instanceID = GeometryInstanceID(q.CommittedInstanceID(), q.CommittedGeometryIndex());
-            triangleHit.primitiveIndex = q.CommittedPrimitiveIndex();
-            triangleHit.barycentrics = q.CommittedTriangleBarycentrics();
-            hitPos = gScene.getVertexData(triangleHit).posW;
-        }*/ // use for debugging if you ever need to find triangle hit data
-        return false;
-    }
-}
-
 // Returns a pixel location randomly selected from within a certain radius of the current pixel in [neighbor]. Returns false if it was oob
 bool getSpatialNeighbor(uint2 pixel, uint radius, inout SampleGenerator sg, out int2 neighbor) {
     int2 offset = (int2)(radius * sample_disk(sampleNext2D(sg)));
