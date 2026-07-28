@@ -2,6 +2,15 @@ import RestirReservoir;
 import PathState;
 import RestirHelpers;
 import Scene.Raytracing;
+import Utils.Sampling.SampleGenerator;
+
+struct ShiftDebugData {
+    uint reasonFail;
+
+    __init() {
+        reasonFail = 0;
+    }
+}
 
 /**
  * Traces a shadow ray towards a light source.
@@ -49,7 +58,7 @@ Notes:
 [prevThp] should be 1 for the normal reconnection shift
 
 */
-bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool temporalDst, ShadingData y_sd, RCVertex x_k_rcVertex, uint rcVertexIndex, PathState x_path, float3 prevThp, out Sample Y, inout float jacobian, inout SampleGenerator sg) {
+bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool temporalDst, ShadingData y_sd, RCVertex x_k_rcVertex, uint rcVertexIndex, PathState x_path, float3 prevThp, out Sample Y, inout float jacobian, inout SampleGenerator sg, inout ShiftDebugData d) {
 
     // Create material instance at shading point.
     let lod1 = ExplicitLodTextureSampler(0.f);
@@ -57,6 +66,7 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
 
     HitInfo rcHitInfo = HitInfo(x_k_rcVertex.packedHitInfo);
     if (!rcHitInfo.isValid() && luminance(x_k_rcVertex.incomingRadiance) == 0.f) {
+        d.reasonFail = 1;
         return false; // can't do shift if x_k isn't valid. if incoming radiance is 0 the shifted path will have 0 contribution so we can fail it
         //this step will also exclude the k = d cases
     }
@@ -68,6 +78,7 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
         rcPos = temporalSrc ? gScene.getPrevPosW(rcHitInfo) : gScene.getVertexData(rcHitInfo.getTriangleHit()).posW;
     } else {
         // oither types not supported for now
+        d.reasonFail = 2;
         return false;
     }
     float3 y_kMinus1_rayOrigin = y_sd.computeRayOrigin();
@@ -75,6 +86,7 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
     float3 rcIncomingDir = normalize(toRCVert);
     float epsilon = 1e-5f; // shorten shadow ray distance to avoid reporting rcPos as intersection
     if (!traceShadowRay(y_kMinus1_rayOrigin, rcIncomingDir, length(toRCVert) - epsilon)) { // TODO / CAUTION: this is traced against current BVH / accel structure. in a dynamic scene this will cause bias.
+        d.reasonFail = 3;
         return false; // this shift is not valid if x_k is occluded from y_(k-1)
     }
     float3 rcThp = y_kMinus1_mi.evalBSDF(y_sd, rcIncomingDir, x_k_rcVertex.prevSampledLobeType, sg);
@@ -141,5 +153,7 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
     Y.rcVertex = x_k_rcVertex;
     Y.path = x_path;
 
-    return jacobian != 0.f && luminance(Y.p_hat) != 0.f; // if jacobian = 0, or p hat is 0, w_i will be 0 so it'll be as if the shift failed
+    bool success = jacobian != 0.f && luminance(Y.p_hat) != 0.f; // if jacobian = 0, or p hat is 0, w_i will be 0 so it'll be as if the shift failed
+    if (!success) d.reasonFail = 4;
+    return success;
 }

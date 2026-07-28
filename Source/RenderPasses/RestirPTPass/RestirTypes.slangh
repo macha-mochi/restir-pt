@@ -78,6 +78,11 @@ struct PRNGSeed
 
     #ifndef HOST_CODE
 
+    __init(){
+        pixel = uint2(0, 0);
+        sampleNumber = 0;
+    }
+
     __init(uint2 pix, uint sampleNum){
         pixel = pix;
         sampleNumber = sampleNum;

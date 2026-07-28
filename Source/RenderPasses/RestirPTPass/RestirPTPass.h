@@ -91,9 +91,9 @@ private:
     /// Whether to do spatial reuse
     bool mUseSpatialReuse = true;
     /// Number of spatial neighbors per pixel
-    uint mNumSpatialNeighbors = 3;
+    uint mNumSpatialNeighbors = 1;
     /// Whether to do temporal reuse
-    bool mUseTemporalReuse = true;
+    bool mUseTemporalReuse = false;
 
     // Runtime data
 
@@ -119,6 +119,7 @@ private:
     ref<Texture> mpTemporalViewDir; ///< Last frame's view direction texture
 
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
+    ref<Buffer> mpSpatialOffsetBuffer; ///< Buffer of size (elementCount * numSpatialNeighbors per pixel) storing the amount to offset a pixel by to get its neighbor
 
     //Compute passes
     ref<ComputePass> mpReflectTypes; /// Dummy compute pass for preparing resources of the right type

@@ -775,7 +775,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
 Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 {
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
-    Reservoir r;
+    Reservoir r = {};
 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
     const float3 primaryRayDir = getPrimaryRayDir(pixel, frameDim, gScene.camera);
@@ -1124,26 +1124,11 @@ void rayGen()
 
     Reservoir r = tracePath(pixel, frameDim);
 
-    uint bufferInd = pixel.y * frameDim.x + pixel.x;
-    gReservoirBuffer[bufferInd] = r;
+    uint pixelInd = pixel.y * frameDim.x + pixel.x;
+    gReservoirBuffer[pixelInd] = r;
 
-    /*uint rci = debugBuffer[bufferInd].sc.rcVertexInd;
-    if (rci == 0) {
-        outputColor[pixel] = float4(0, 0, 1, 1);
-    } else if (rci != r.rcVertexIndex) {
-        outputColor[pixel] = float4(1, 0, 0, 1);
-    }else {
-        outputColor[pixel] = float4(0, 0, 0, 1);
-    }*/
-    float3 color = float3(0, 0, 0);
-    if (r.rcVertexIndex == 2) {
-        color.x = 1;
-    } else if(r.rcVertexIndex == 3) {
-        color.y = 1;
-    } else if (r.rcVertexIndex == 4) {
-        color.z = 1;
-    } else if (r.rcVertexIndex == 5) {
-        color = float3(1, 0, 1);
-    }
-    outputColor[pixel] = float4(color, 1);
+    #if IS_LAST_PASS
+        // we calculate the final color here
+        outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
+    #endif
 }
