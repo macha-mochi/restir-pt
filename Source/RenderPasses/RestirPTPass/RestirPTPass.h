@@ -69,7 +69,7 @@ private:
     bool prepareLighting(RenderContext* pRenderContext);
     void prepareResources(RenderContext* pRenderContext, const RenderData& renderData);
     void PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData);
-    void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal, uint spatialIndex);
+    void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
 
     // Internal state
 
@@ -87,13 +87,13 @@ private:
     /// Use importance sampling for materials.
     bool mUseImportanceSampling = true;
     /// Type of shift mapping used
-    ShiftMappingType mShiftMappingType = ShiftMappingType::Hybrid;
+    ShiftMappingType mShiftMappingType = ShiftMappingType::Reconnection;
     /// Whether to do spatial reuse
-    bool mUseSpatialReuse = true;
+    bool mUseSpatialReuse = false;
     /// Number of spatial neighbors per pixel
     uint mNumSpatialNeighbors = 1;
     /// Whether to do temporal reuse
-    bool mUseTemporalReuse = false;
+    bool mUseTemporalReuse = true;
 
     // Runtime data
 
@@ -128,7 +128,8 @@ private:
 
     //Debugging resources
     ref<Buffer> mpCandidateGenDebugBuffer;
-    ref<Buffer> mpResamplingDebugBuffer;
+    ref<Buffer> mpTemporalDebugBuffer;
+    ref<Buffer> mpSpatialDebugBuffer;
 
     bool mUsePathViewer = false; // if true, the renderer is paused so you can click around pixels on that frame
     uint2 mMousePixelPos;

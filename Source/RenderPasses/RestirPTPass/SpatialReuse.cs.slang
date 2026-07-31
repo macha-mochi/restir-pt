@@ -7,18 +7,10 @@ import Scene.Raytracing;
 
 struct DebugData
 {
-    float J_pixelToNeighbor;
-    float J_neighborToPixel;
-    float3 orig_p_hat;
-    float3 pixelToNeighbor_p_hat;
-    float3 neighborToPixel_p_hat;
+    float dummy;
 
     __init(){
-        J_pixelToNeighbor = 0;
-        J_neighborToPixel = 0;
-        orig_p_hat = float3(0);
-        pixelToNeighbor_p_hat = float3(0);
-        neighborToPixel_p_hat = float3(0);
+        dummy = 1.f;
     }
 };
 
@@ -100,8 +92,7 @@ struct SpatialReusePass {
     void execute(uint2 pixel) {
         if (any(pixel >= gOutputDimensions)) return; // return if oob
 
-        uint pixelInd = ind(pixel);
-        Reservoir r = inputBuffer[pixelInd]; //copy the input reservoir
+        Reservoir r = {}; //copy the input reservoir
 
         SampleGenerator sg = SampleGenerator(pixel, gFrameCount);
         // Advance the generator to the first available dimension.
@@ -111,151 +102,62 @@ struct SpatialReusePass {
 
         DebugData debugData = {};
 
-        // If this is the 1st spatial pass, choose spatial neighbors and put them in their buffer
-        if (gSpatialPassIndex == 0) {
-            generateSpatialOffsets(pixel, sg);
+        generateSpatialOffsets(pixel, sg);
+
+        // Treat input buffer sample as canonical.
+        float m_num = inputBuffer[ind(pixel)].c * luminance(inputBuffer[ind(pixel)].X.p_hat); // alr in the correct domain
+        float m_den = m_num;
+        for (int i = 0; i < kNumSpatialNeighbors; ++i) { // want to shift the canonical sample to spatial neighbors' domains
+            int2 neighbor = int2(0);
+            bool validNeighbor = getSpatialNeighbor(pixel, i, neighbor);
+            if (validNeighbor) {
+                Sample Y_neighborDomain = {};
+                float inverse_jacobian = inputBuffer[ind(pixel)].J; // initialize to srcG, src is this pixel
+                bool success = false;
+                ShiftDebugData d = {};
+                if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
+                {
+                    HitInfo dstHit = HitInfo(vBuffer[neighbor]); // get hit info for the vertex right before rc shift vertex on this pixel
+                    ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[neighbor].xyz);
+                    success = performReconnectionShift( ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
+                        y1_SD, // vertex right before reconnection vert on the dst domain's path
+                        inputBuffer[ind(pixel)].X.rcVertex, 2, inputBuffer[ind(pixel)].X.path,      // information from the base path aka canonical sample
+                        float3(1.f),                         // previous thp = 1
+                        Y_neighborDomain, inverse_jacobian, sg, d); // out or inout variables
+                } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
+                }
+                if (success) {
+                    m_den += inputBuffer[ind(neighbor)].c * luminance(Y_neighborDomain.p_hat) * inverse_jacobian; // we just did the inverse shift mapping, jacobian = |T(-1)(y)|
+                }
+            }
         }
-        // Prep temporal domain data. TODO: this calculation will be the same for every pixel, potential optimization also calc it once and store in buffer?
-        int2 pixelLastFrame = int2(0, 0);
-        bool pixelHasValidTemporalPos = calcLastFramePixelPos(pixel, pixelLastFrame);
+        float w_i = (m_num / m_den) * luminance(inputBuffer[ind(pixel)].X.p_hat) * inputBuffer[ind(pixel)].W_X; // jacobian is 1 bc alr in right domain
+        if(isnan(w_i)) w_i = 0.f;
+        if (r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg)) {
+            r.copySampleGenerationInfo(inputBuffer[ind(pixel)]);
+        }
 
-        #if IS_FIRST_PASS
-            // If this is the first resampling pass, we need to fix the w_i for the canonical (new) sample generated to include the MIS weights.
-            float m_num = r.c * luminance(r.X.p_hat); // alr in the correct domain
-            float m_den = m_num;
-            for (int i = 0; i < kNumSpatialNeighbors; i++) { // want to shift the canonical sample to spatial neighbors' domains
-                int2 neighbor = int2(0);
-                bool validNeighbor = getSpatialNeighbor(pixel, i, neighbor);
-                if (validNeighbor) {
-                    Sample Y_neighborDomain = {};
-                    float j_inverse = inputBuffer[ind(pixel)].J; //initialize to srcG, src is this pixel
-                    bool success = false;
-                    ShiftDebugData d = {};
-                    if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
-                    {
-                        HitInfo dstHit = HitInfo(vBuffer[neighbor]); //get hit info for the vertex right before rc shift vertex on this pixel
-                        ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[neighbor].xyz);
-                        success = performReconnectionShift(ShiftMappingType::Reconnection, false, false, //settings for the shift: reconnection, no temporal src or dst
-                                                            y1_SD, // vertex right before reconnection vert on the dst domain's path
-                                                            inputBuffer[ind(pixel)].X.rcVertex, 2, inputBuffer[ind(pixel)].X.path, // information from the base path aka canonical sample
-                                                            1.f, // previous thp = 1
-                                                            Y_neighborDomain, j_inverse, sg, d); //out or inout variables
-                    } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
-                        
-                    }
-                    if (success) {
-                        m_den += inputBuffer[ind(neighbor)].c * luminance(Y_neighborDomain.p_hat) * j_inverse; // we just did the inverse shift mapping, jacobian = |T(-1)(y)|
-                    }
-                }
-            }
-            if (kPerformTemporalReuse) {
-                if (pixelHasValidTemporalPos) { //try to shift Y into last frame
-                    Sample Y_lastFrame = {};
-                    float j_inverse = inputBuffer[ind(pixel)].J; // initialize to srcG, src is this pixel
-                    bool success = false;
-                    ShiftDebugData d = {};
-                    if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
-                    {
-                        HitInfo dstHit = HitInfo(temporalVBuffer[pixelLastFrame]);
-                        ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.data.prevPosW, -temporalViewW[pixelLastFrame].xyz);
-                        success = performReconnectionShift(ShiftMappingType::Reconnection, false, true, // settings for the shift: reconnection, src is this frame and dst is last frame
-                            y1_SD, // vertex right before reconnection vert on the dst domain's path
-                            inputBuffer[ind(pixel)].X.rcVertex, 2, inputBuffer[ind(pixel)].X.path,   // information from the base path aka canonical sample
-                            1.f,                              // previous thp = 1
-                            Y_lastFrame, j_inverse, sg, d); // out or inout variables
-                    } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
-                    }
-                    if (success) {
-                        m_den += temporalBuffer[ind(pixelLastFrame)].c * luminance(Y_lastFrame.p_hat) * j_inverse;
-                    }
-                }
-            }
-            float w_i = (m_num / m_den) * luminance(r.X.p_hat) * r.W_X; // jacobian is 1 bc alr in right domain
-            if (!isnan(w_i)) {
-                r.X.w_i = w_i;
-                r.w_sum = w_i;
-                r.W_X *= (m_num / m_den); // W_X gets set to w_sum / luminance(X) when updating reservoir, terms cancel
-            }
-        #endif
+        // Spatial passes
+        for(int i = 0; i < kNumSpatialNeighbors; i++){
+            int2 neighbor = int2(0);
+            if (!getSpatialNeighbor(pixel, i, neighbor)) continue;
 
-        /*
-        outputColor[pixel] = float4(0, 0, 0, 1);
-        // test reconnection shift by shifting pixel to neighbor and then back to pixel, also test neighbor to pixel and then back to neighbor
-        int2 neighbor = int2(0);
-        bool validNeighbor = getSpatialNeighbor(pixel, 0, neighbor);
-        bool success = false;
-        Sample Y_neighborDomain = {};
-        float jacobian = inputBuffer[ind(pixel)].J; //J is the jacobian denom rn, so the portion with data from the src
-        if (validNeighbor) {
-            //shift from pixel to neighbor
-            ShiftDebugData d = {};
-            HitInfo dstHit = HitInfo(vBuffer[neighbor]); // get hit info for the vertex right before rc shift vertex on this pixel
-            ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[neighbor].xyz);
-            success = performReconnectionShift(ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
-                                         y1_SD, // vertex right before reconnection vert on the dst domain's path
-                                         inputBuffer[ind(pixel)].X.rcVertex, 2, inputBuffer[ind(pixel)].X.path,     // information from the base path aka pixel
-                                         1.f,                                // previous thp = 1
-                                         Y_neighborDomain, jacobian, sg, d); // out or inout variables
-            debugData.J_pixelToNeighbor = jacobian;
-            if (success) {
-                //try shifting back to pixel
-                dstHit = HitInfo(vBuffer[pixel]);
-                y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[pixel].xyz);
-                Sample Y_shiftBack = {};
-                float backJacobian = jacobian * inputBuffer[ind(pixel)].J; //this should the numerator of jacobian of pixel to neighbor
-                bool backSuccess = performReconnectionShift(ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
-                                         y1_SD, // vertex right before reconnection vert on the dst domain's path
-                                         Y_neighborDomain.rcVertex, 2, Y_neighborDomain.path,     // information from the base path aka neighbpr
-                                         1.f,                                // previous thp = 1
-                                         Y_shiftBack, backJacobian, sg, d); // out or inout variables
-                if(backSuccess){
-                    // need: p hat of shifted back needs to be abt the same as original
-                    // jacobians to cancel to 1
-                    debugData.J_neighborToPixel = backJacobian;
-                    Sample og = inputBuffer[ind(pixel)].X;
-                    debugData.orig_p_hat = og.p_hat;
-                    debugData.pixelToNeighbor_p_hat = Y_neighborDomain.p_hat;
-                    debugData.neighborToPixel_p_hat = Y_shiftBack.p_hat;
-
-                    float3 diff = abs(og.p_hat - Y_shiftBack.p_hat);
-                    float4 color = (1, 1, 1, 1);
-                    if (dot(diff, diff) > 1e-3) {
-                        color.x = 0;
-                    }
-
-                    float err = abs(jacobian * backJacobian - 1.f);
-                    if (err > 1e-3) {
-                        color.y = 0;
-                    }
-                    outputColor[pixel] = color;
-                } else {
-                    outputColor[pixel] = float4(1, 0, 0, 1);
-                }
-            }
-        }*/
-        
-
-        // Spatial: do one iteration of spatial reuse
-        int2 neighbor = int2(0);
-        bool validNeighbor = getSpatialNeighbor(pixel, gSpatialPassIndex, neighbor);
-        if (validNeighbor) {
             Sample neighbor_curDomain = {};
             float w_i = 0.f;
-            float jacobian = inputBuffer[ind(neighbor)].J; // denom of jacobian of shifting X from neighbor into [pixel]'s domain, |T(X)|
+            float jacobian = inputBuffer[ind(neighbor)].J; // denom of jacobian of shifting from neighbor into [pixel]'s domain, |T(X)|
             bool shiftSucceeded = false;
             ShiftDebugData d = {};
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
             {
                 HitInfo dstHit = HitInfo(vBuffer[pixel]);
                 ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[pixel].xyz);
-                shiftSucceeded = performReconnectionShift(ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
+                shiftSucceeded = performReconnectionShift( ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
                     y1_SD, // vertex right before reconnection vert on the dst domain's path
-                    inputBuffer[ind(neighbor)].X.rcVertex, 2, inputBuffer[ind(neighbor)].X.path,   // information from the base path aka neighbor's sample
-                    1.f,                              // previous thp = 1
+                    inputBuffer[ind(neighbor)].X.rcVertex, 2, inputBuffer[ind(neighbor)].X.path,    // information from the base path aka neighbor's sample
+                    float3(1.f),                          // previous thp = 1
                     neighbor_curDomain, jacobian, sg, d); // out or inout variables
             } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
             {
-               
             }
 
             float newJ = 0.f;
@@ -263,21 +165,23 @@ struct SpatialReusePass {
                 newJ = jacobian * inputBuffer[ind(neighbor)].J;
                 float m_num = inputBuffer[ind(neighbor)].c * luminance(inputBuffer[ind(neighbor)].X.p_hat) / jacobian; // i is the domain that [preshiftNeighbor] came from
                 float m_den = m_num;
-                // process new/canonical candidate for m_den
+                // process canonical candidate for m_den
                 m_den += inputBuffer[ind(pixel)].c * luminance(neighbor_curDomain.p_hat); // jacobian is 1 since it came from this domain
+
                 // add terms to m_den for what if this sample came from the other spatial domains
                 Sample shifted = {};
-                float j_inverse = 0.f;
+                float inverse_jacobian = 0.f;
                 bool success = false;
                 ShiftDebugData d = {};
                 for (int j = 0; j < kNumSpatialNeighbors; j++) {
-                    if (j != gSpatialPassIndex) {
+                    if (j != i) {
                         shifted = {};
+                        inverse_jacobian = newJ; // jacobian denom of shifting samples into this spatial neighbor's domain, |T(-1)(y)|, is jacobianNum of shifting from neighbor to [pixel]
+                        success = false;
                         d = {};
-                        j_inverse = newJ; // jacobian denom of shifting samples into this spatial neighbor's domain, |T(-1)(y)|, is jacobianNum of shifting from neighbor to [pixel]
+
                         int2 otherNeighbor = int2(0);
-                        bool validOtherNeighbor = getSpatialNeighbor(pixel, j, otherNeighbor);
-                        if (!validOtherNeighbor) continue;
+                        if (!getSpatialNeighbor(pixel, j, otherNeighbor)) continue;
 
                         if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
                         {
@@ -285,39 +189,14 @@ struct SpatialReusePass {
                             ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[otherNeighbor].xyz);
                             success = performReconnectionShift( ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
                                 y1_SD, // vertex right before reconnection vert on the dst domain's path
-                                neighbor_curDomain.rcVertex, 2, neighbor_curDomain.path, // information from the base path, which is in [pixel]'s domain
-                                1.f,                     // previous thp = 1
-                                shifted, j_inverse, sg, d); // out or inout variables
-                        } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
-                        {
-
-                        }
-                        if (success) {
-                            m_den += inputBuffer[ind(otherNeighbor)].c * luminance(shifted.p_hat) * j_inverse;
-                        }
-                    }
-                }
-                if (kPerformTemporalReuse) { // add to mis denom for temporal, shift this sample into what it would have looked like last frame
-                    j_inverse = newJ;
-                    if (pixelHasValidTemporalPos) {
-                        Sample shifted = {};
-                        success = false;
-                        d = {};
-                        if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
-                        {
-                            HitInfo dstHit = HitInfo(temporalVBuffer[pixelLastFrame]);
-                            ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.data.prevPosW, -temporalViewW[pixelLastFrame].xyz);
-                            success = performReconnectionShift( ShiftMappingType::Reconnection, false, true,  // settings for the shift: reconnection, src is this frame and dst is last frame
-                                y1_SD, // vertex right before reconnection vert on the dst domain's path
-                                neighbor_curDomain.rcVertex, 2, neighbor_curDomain.path, // information from the base path aka canonical sample
-                                1.f,                            // previous thp = 1
-                                shifted, j_inverse, sg, d);    // out or inout variables
+                                neighbor_curDomain.rcVertex, 2, neighbor_curDomain.path,   // information from the base path, which is in [pixel]'s domain
+                                float3(1.f), // previous thp = 1
+                                shifted, inverse_jacobian, sg, d); // out or inout variables
                         } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
                         {
                         }
-                        
                         if (success) {
-                            m_den += temporalBuffer[ind(pixelLastFrame)].c * luminance(shifted.p_hat) * j_inverse;
+                            m_den += inputBuffer[ind(otherNeighbor)].c * luminance(shifted.p_hat) * inverse_jacobian;
                         }
                     }
                 }
@@ -326,20 +205,19 @@ struct SpatialReusePass {
                 w_i = (m_num / m_den) * luminance(neighbor_curDomain.p_hat) * inputBuffer[ind(neighbor)].W_X * jacobian;
                 if (isnan(w_i)) w_i = 0.f;
             }
-            // update reservoir streaming (in new buffer)
             neighbor_curDomain.w_i = w_i;
-            if(r.updateReservoir(neighbor_curDomain, w_i, inputBuffer[ind(neighbor)].c, sg))
+            if (r.updateReservoir(neighbor_curDomain, w_i, inputBuffer[ind(neighbor)].c, sg))
             {
+                r.copySampleGenerationInfo(inputBuffer[ind(neighbor)]);
                 r.J = newJ;
+                debugData.dummy = 2.f;
             }
         }
-        outputBuffer[ind(pixel)] = r;
-        debugBuffer[pixelInd] = debugData;
 
-        #if IS_LAST_PASS
-            // If this is the last pass, should calculate the output color
-            outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[pixelInd], 1);
-        #endif
+        outputBuffer[ind(pixel)] = r;
+        debugBuffer[ind(pixel)] = debugData;
+
+        outputColor[pixel] = float4(outputBuffer[ind(pixel)].X.p_hat * outputBuffer[ind(pixel)].W_X + di_bgBuffer[ind(pixel)], 1);
     }
 }
 

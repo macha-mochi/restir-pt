@@ -245,7 +245,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         bind(var, channel);
 
     var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];
-    mpReservoirBuffers[mOutputReservoirID]->setName("restir output buffer");
+    mpReservoirBuffers[mOutputReservoirID]->setName("Restir Candidate Output Buffer");
     var["gDI_BGBuffer"] = mpDiBgBuffer;
 
     uint elementCount = targetDim.x * targetDim.y;
@@ -270,31 +270,29 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mOutputReservoirID = 1 - mOutputReservoirID;
 
     //SPATIOTEMPORAL RESAMPLING
-    if (mUseTemporalReuse)
+    if (mUseTemporalReuse && mFrameCount > 0) //no temporal history yet on frame 0
     {
-        PathReusePass(pRenderContext, renderData, true, 0);
+        PathReusePass(pRenderContext, renderData, true);
         mInputReservoirID = mOutputReservoirID;
         mOutputReservoirID = 1 - mOutputReservoirID;
     }
     if (mUseSpatialReuse)
     {
-        for (uint i = 0; i < mNumSpatialNeighbors; i++)
-        {
-            PathReusePass(pRenderContext, renderData, false, i);
-            mInputReservoirID = mOutputReservoirID;
-            mOutputReservoirID = 1 - mOutputReservoirID;
-        }
+        PathReusePass(pRenderContext, renderData, false);
+        mInputReservoirID = mOutputReservoirID;
+        mOutputReservoirID = 1 - mOutputReservoirID;
     }
 
     //Update data for next frame
     pRenderContext->copyResource(mpTemporalVBuffer.get(), renderData.getTexture(kInputVBuffer).get());
     pRenderContext->copyResource(mpTemporalViewDir.get(), renderData.getTexture(kInputViewDir).get());
-    pRenderContext->copyResource(mpReservoirBuffers[mTemporalReservoirID].get(), mpReservoirBuffers[mOutputReservoirID].get()); //TODO potentially wasteful, mb make a function to swap the reservoir ids or smth instead
+    //the buffer that input reservoir id points to was actually the one that just got output written to it it just got switched in prep for next round
+    pRenderContext->copyResource(mpReservoirBuffers[mTemporalReservoirID].get(), mpReservoirBuffers[mInputReservoirID].get()); //TODO potentially wasteful, mb make a function to swap the reservoir ids or smth instead
 
     mFrameCount++;
 }
 
-void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal, uint spatialIndex)
+void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal)
 {
     // Set shader vars, and bind i/o buffers. don't add new defines here bc the compute pass is already set after you created it when you
     // set the scene
@@ -303,10 +301,10 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     program->addDefine("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
     program->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
     program->addDefine("USE_SPATIAL", mUseSpatialReuse ? "1" : "0");
-    program->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0"); // no temporal reuse if no temporal history yet
-    bool firstPass = isTemporal || (!isTemporal && spatialIndex == 0);
+    program->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0");
+    bool firstPass = isTemporal || (!mUseTemporalReuse);
     program->addDefine("IS_FIRST_PASS", firstPass ? "1" : "0");
-    bool lastPass = (isTemporal && !mUseSpatialReuse) || (!isTemporal && spatialIndex == mNumSpatialNeighbors - 1);
+    bool lastPass = (isTemporal && !mUseSpatialReuse);
     program->addDefine("IS_LAST_PASS", lastPass ? "1" : "0");
 
     auto var = pPass->getRootVar();
@@ -314,10 +312,6 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     auto& dict = renderData.getDictionary();
     var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
     var["CB"]["gOutputDimensions"] = targetDim;
-    if (!isTemporal)
-    {
-        var["CB"]["gSpatialPassIndex"] = spatialIndex;
-    }
 
     //Bind textures and buffers to the resample pass specifically
     /*
@@ -342,7 +336,7 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     passVar["vBuffer"] = renderData.getTexture(kInputVBuffer);
     passVar["viewW"] = renderData.getTexture(kInputViewDir);
     passVar["motionVectors"] = renderData.getTexture(kInputMotionVectors);
-    if (lastPass)
+    if (lastPass || !isTemporal)
     {
         passVar["outputColor"] = renderData.getTexture(kOutputColor);
     }
@@ -357,21 +351,36 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     // We assume that the reservoir IDs have already been set to correct values before this func was called
     passVar["inputBuffer"] = mpReservoirBuffers[mInputReservoirID];
     passVar["outputBuffer"] = mpReservoirBuffers[mOutputReservoirID];
+    mpReservoirBuffers[mInputReservoirID]->setName("Restir Resampled Input Buffer");
+    mpReservoirBuffers[mOutputReservoirID]->setName("Restir Resampled Output Buffer");
     passVar["temporalBuffer"] = mpReservoirBuffers[mTemporalReservoirID];
+    mpReservoirBuffers[mTemporalReservoirID]->setName("Restir Resampled Temporal Buffer");
     passVar["di_bgBuffer"] = mpDiBgBuffer;
     passVar["spatialOffsetBuffer"] = mpSpatialOffsetBuffer;
 
     uint elementCount = targetDim.x * targetDim.y;
-    if (!mpResamplingDebugBuffer || mpResamplingDebugBuffer->getElementCount() < elementCount)
+    if (isTemporal)
     {
-        mpResamplingDebugBuffer = mpDevice->createStructuredBuffer(passVar["debugBuffer"], elementCount);
-        mpResamplingDebugBuffer->setName("Restir Resampling Debug Buffer");
-        passVar["debugBuffer"] = mpResamplingDebugBuffer;
+        if (!mpTemporalDebugBuffer || mpTemporalDebugBuffer->getElementCount() < elementCount)
+        {
+            mpTemporalDebugBuffer = mpDevice->createStructuredBuffer(passVar["debugBuffer"], elementCount);
+            mpTemporalDebugBuffer->setName("Restir Debug Buffer - Temporal");
+        }
+        passVar["debugBuffer"] = mpTemporalDebugBuffer;
     }
+    else
+    {
+        if (!mpSpatialDebugBuffer || mpSpatialDebugBuffer->getElementCount() < elementCount)
+        {
+            mpSpatialDebugBuffer = mpDevice->createStructuredBuffer(passVar["debugBuffer"], elementCount);
+            mpSpatialDebugBuffer->setName("Restir Debug Buffer - Spatial");
+        }
+        passVar["debugBuffer"] = mpSpatialDebugBuffer;
+    }
+    
     mpScene->bindShaderData(var["gScene"]); // binds the Scene parameter block (as seen in Scene.slang w all the vertex and geometry buffers
 
     pPass->execute(pRenderContext, targetDim.x, targetDim.y);
-
 }
 
 void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData)
@@ -426,6 +435,9 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
     dirty |= widget.checkbox("Use importance sampling", mUseImportanceSampling);
     widget.tooltip("Use importance sampling for materials", true);
 
+    dirty |= widget.checkbox("Temporal reuse", mUseTemporalReuse);
+    widget.tooltip("Use temporal reuse for Restir resampling", true);
+
     dirty |= widget.checkbox("Spatial reuse", mUseSpatialReuse);
     widget.tooltip("Use spatial reuse for Restir resampling", true);
 
@@ -434,9 +446,6 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
         dirty |= widget.var("Num spatial neighbors", mNumSpatialNeighbors, 1u, 10u);
         widget.tooltip("Number of spatial neighbors to resample from. Capped at 10 currently, recommended 3", true);
     }
-
-    dirty |= widget.checkbox("Temporal reuse", mUseTemporalReuse);
-    widget.tooltip("Use temporal reuse for Restir resampling", true);
 
     dirty |= widget.dropdown("Shift mapping type", mShiftMappingType);
     widget.tooltip("What type of shift mapping to use for spatial/temporal reuse.", true);
@@ -592,13 +601,15 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
              {"IS_FIRST_PASS", "0"},
              {"IS_LAST_PASS", "0"}}
         );
-        /* mpTemporalReusePass = createComputePass(
+        mpTemporalReusePass = createComputePass(
             kTemporalComputeShaderFile, "main",
             {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)},
              {"USE_SPATIAL", mUseSpatialReuse ? "1" : "0"},
              {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
-             {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"}}
-        );*/
+             {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"},
+             {"IS_FIRST_PASS", "0"},
+             {"IS_LAST_PASS", "0"}}
+        );
     }
 }
 

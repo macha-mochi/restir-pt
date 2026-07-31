@@ -35,7 +35,7 @@ struct Reservoir
     float w_sum; //sum of all lowercase w seen so far, for use in resampling
     uint c; //cap at 20
 
-    // Information that needs to be initialized by caller in path tracing loop
+    // Information that needs to be initialized by caller in path tracing loop (Sample Generation Info)
     PRNGSeed seed;
     PRNGSeed postRCSeed;    // only used if we need to replay the path after RC, temporally
     uint rcVertexIndex; //0 is camera, 1 is primary hit, etc. This should be >= 2
@@ -57,6 +57,7 @@ struct Reservoir
     bool updateReservoir(Sample sample, float w_i_new, uint c_i, SampleGenerator sg) {
         w_sum += w_i_new;
         c += c_i;
+        c = min(c, 20); //setting a c cap of 20
         if (w_i_new == 0) { // no chance to be chosen and no need to update W_X since w_sum doesn't change
             return false;
         }
@@ -67,9 +68,15 @@ struct Reservoir
             updateSample = true;
         }
         W_X = w_sum / luminance(X.p_hat); // if we got to this point, w_i_new is non zero meaning mi, p_hat, and W_X were all nonzero. so not a null sample
-        c = min(c, 20); //setting a c cap of 20
 
         return updateSample;
+    }
+    [mutating]
+    void copySampleGenerationInfo(Reservoir src) {
+        seed = src.seed;
+        postRCSeed = src.seed;
+        rcVertexIndex = src.rcVertexIndex;
+        J = src.J;
     }
 };
 float luminance(float3 vec) {

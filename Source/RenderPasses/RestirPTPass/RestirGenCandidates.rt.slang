@@ -104,10 +104,10 @@ struct ShadowRayData
 };
 
 struct DebugData {
-    uint finalPathFlags;
+    uint c;
 
     __init() {
-        finalPathFlags = 0;
+        c = 0;
     }
 }
 
@@ -776,6 +776,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 {
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
     Reservoir r = {};
+    PathViewerPath debugPath = {};
 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
     const float3 primaryRayDir = getPrimaryRayDir(pixel, frameDim, gScene.camera);
@@ -831,8 +832,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             r.rcVertexIndex = 2;
         }
 
-        //Create debug path data
-        PathViewerPath debugPath = PathViewerPath(1, 0);
+        //Add primary hit to debug path
         debugPath.vertices[0] = rayOrigin;
 
         // do nee for first bounce bc when that scatter ray gets traced we (might) need NEESample to represent the length 2 paths
@@ -866,6 +866,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex, rayData.path);
                     curNEESample.rcVertex.incomingRadiance = curNEESample.p_hat / pre_rc_thp;
                 }
+                curNEESample.path.incrementVertexIndex(); //it uses rayData.path which includes data abt type of light sampled, but its vertexIndex was only incremented at the hit that spawned this nee
                 if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
                     if(kShiftMappingType == (uint)ShiftMappingType::Reconnection){
                         r.J = rayData.sampleData.j_denom;
@@ -896,6 +897,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             // Clear NEE sample data in preparation for sampleNEE to be called again within handleHit (if scatter ray hits).
             rayData.sampleData.nee_p_hat = { 0.f, 0.f, 0.f };
             rayData.sampleData.nee_w_i = 0.f;
+            rayData.path.clearSampleTechniqueAndLightTypes(); //in prep for next vert
 
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
@@ -939,19 +941,21 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             }
 
             if (!rayData.path.isTerminated()) {
-                //debugPath.vertices[depth + 1] = rayData.origin;
+                debugPath.vertices[depth + 1] = rayData.origin;
             }
         }
 
-        rayData.d.finalPathFlags = rayData.path.flagsAndVertexIndex;
         debugBuffer[bufferInd] = rayData.d;
-        gPathDebugBuffer[bufferInd] = debugPath;
     }
     else
     {
         // Background pixel. We don't hit anything in the scene so this is completely independent from NEE and you don't even need restir for this
         gDI_BGBuffer[bufferInd] = kUseEnvBackground ? gScene.envMap.eval(primaryRayDir) : kDefaultBackgroundColor; //this will be added onto a 0 reservoir value
+
+        debugBuffer[bufferInd] = {};
     }
+
+    gPathDebugBuffer[bufferInd] = debugPath;
 
     return r;
 }
