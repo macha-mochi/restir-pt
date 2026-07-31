@@ -89,9 +89,9 @@ private:
     /// Type of shift mapping used
     ShiftMappingType mShiftMappingType = ShiftMappingType::Reconnection;
     /// Whether to do spatial reuse
-    bool mUseSpatialReuse = false;
+    bool mUseSpatialReuse = true;
     /// Number of spatial neighbors per pixel
-    uint mNumSpatialNeighbors = 1;
+    uint mNumSpatialNeighbors = 3;
     /// Whether to do temporal reuse
     bool mUseTemporalReuse = true;
 

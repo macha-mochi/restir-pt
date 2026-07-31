@@ -314,39 +314,28 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     var["CB"]["gOutputDimensions"] = targetDim;
 
     //Bind textures and buffers to the resample pass specifically
-    /*
-    * // Inputs
-    Texture2D<PackedHitInfo> vBuffer;
-    Texture2D<PackedHitInfo> temporalVBuffer;
-    Texture2D<float4> viewW; // Originally optional but we include it
-    Texture2D<float4> temporalViewW;
-    Texture2D<float2> motionVectors;
-    StructuredBuffer<Reservoir> inputBuffer;
-    StructuredBuffer<Reservoir> temporalBuffer;
-    StructuredBuffer<float3> di_bgBuffer;
-    // Outputs
-    RWStructuredBuffer<uint> spatialOffsetBuffer; 
-    RWStructuredBuffer<Reservoir> outputBuffer;
-    RWTexture2D<float4> outputColor;
-
-    // Debug
-    RWStructuredBuffer<DebugData> debugBuffer;
-    */
     auto passVar = pPass->getRootVar()["CB"]["gResamplePass"];
     passVar["vBuffer"] = renderData.getTexture(kInputVBuffer);
     passVar["viewW"] = renderData.getTexture(kInputViewDir);
-    passVar["motionVectors"] = renderData.getTexture(kInputMotionVectors);
     if (lastPass || !isTemporal)
     {
         passVar["outputColor"] = renderData.getTexture(kOutputColor);
     }
-    if (mpTemporalVBuffer)
+    if (isTemporal)
     {
-        passVar["temporalVBuffer"] = mpTemporalVBuffer;
+        passVar["motionVectors"] = renderData.getTexture(kInputMotionVectors);
+        if (mpTemporalVBuffer)
+        {
+            passVar["temporalVBuffer"] = mpTemporalVBuffer;
+        }
+        if (mpTemporalViewDir)
+        {
+            passVar["temporalViewW"] = mpTemporalViewDir;
+        }
     }
-    if (mpTemporalViewDir)
+    else
     {
-        passVar["temporalViewW"] = mpTemporalViewDir;
+        passVar["spatialOffsetBuffer"] = mpSpatialOffsetBuffer;
     }
     // We assume that the reservoir IDs have already been set to correct values before this func was called
     passVar["inputBuffer"] = mpReservoirBuffers[mInputReservoirID];
@@ -356,7 +345,6 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     passVar["temporalBuffer"] = mpReservoirBuffers[mTemporalReservoirID];
     mpReservoirBuffers[mTemporalReservoirID]->setName("Restir Resampled Temporal Buffer");
     passVar["di_bgBuffer"] = mpDiBgBuffer;
-    passVar["spatialOffsetBuffer"] = mpSpatialOffsetBuffer;
 
     uint elementCount = targetDim.x * targetDim.y;
     if (isTemporal)

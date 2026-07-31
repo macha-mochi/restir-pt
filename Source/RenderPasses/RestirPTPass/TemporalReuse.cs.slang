@@ -67,7 +67,6 @@ struct TemporalReusePass {
     StructuredBuffer<Reservoir> temporalBuffer;
     StructuredBuffer<float3> di_bgBuffer;
     // Outputs
-    RWStructuredBuffer<int2> spatialOffsetBuffer; // stores the offsets from a pixel, which could take on negative values
     RWStructuredBuffer<Reservoir> outputBuffer;
     RWTexture2D<float4> outputColor;
 
@@ -85,33 +84,6 @@ struct TemporalReusePass {
 
     uint ind(uint2 pixel) {
         return pixel.y * gOutputDimensions.x + pixel.x;
-    }
-
-    int2 createSpatialOffset(uint radius, inout SampleGenerator sg) {
-        return (int2)(radius * sample_disk(sampleNext2D(sg)));
-    }
-
-    // Returns the index of the [neighborInd]th offset of [pixel]. FOr exmaple, if i wanted the spatial offset of pixel (x, y) in the first spatial pass, parameters are (x, y) and 0
-    // This is 0 indexed!!
-    uint getOffsetBufferIndex(uint2 pixel, uint neighborInd) {
-        return ind(pixel) * kNumSpatialNeighbors + neighborInd;
-    }
-
-    // Returns the pixel coordinates of the [neighborInd]th neighbor of [pixel] in [neighbor]. 1st spatial pass = 0th neighbor. Returns false if it was oob
-    bool getSpatialNeighbor(uint2 pixel, uint neighborInd, out int2 neighbor) {
-        int2 offset = spatialOffsetBuffer[getOffsetBufferIndex(pixel, neighborInd)];
-        neighbor = pixel + offset;
-        if (neighbor.x < 0 || neighbor.x >= gOutputDimensions.x || neighbor.y < 0 || neighbor.y >= gOutputDimensions.y) {
-            return false;
-        }
-        return true;
-    }
-
-    void generateSpatialOffsets(uint2 pixel, inout SampleGenerator sg) {
-        for (int i = 0; i < kNumSpatialNeighbors; i++) {
-            uint idx = getOffsetBufferIndex(pixel, i);
-            spatialOffsetBuffer[idx] = createSpatialOffset(kSpatialNeighborRadius, sg);
-        }
     }
 
     void execute(uint2 pixel) {

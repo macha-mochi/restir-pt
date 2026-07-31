@@ -26,18 +26,13 @@ cbuffer CB
     uint gPRNGDimension;     // First available PRNG dimension.
     uint2 gOutputDimensions;
 
-    uint gSpatialPassIndex; /// 0 indexed
-
     SpatialReusePass gResamplePass;
 }
 
 struct SpatialReusePass {
     // Inputs
     Texture2D<PackedHitInfo> vBuffer;
-    Texture2D<PackedHitInfo> temporalVBuffer;
     Texture2D<float4> viewW; // Originally optional but we include it
-    Texture2D<float4> temporalViewW;
-    Texture2D<float2> motionVectors;
     StructuredBuffer<Reservoir> inputBuffer;
     StructuredBuffer<Reservoir> temporalBuffer;
     StructuredBuffer<float3> di_bgBuffer;
@@ -48,15 +43,6 @@ struct SpatialReusePass {
 
     // Debug
     RWStructuredBuffer<DebugData> debugBuffer;
-
-    // Finds the pixel position corresponding to the triangle hit by this frame's [pixel], last frame. Returning false if it would be out of bounds
-    // intended usage: use [result] to sample a Texture2D holding data from LAST FRAME. ex: sampling last frame's vbuffer for where our CURRENT frame's pixel would have been in the last frame.
-    bool calcLastFramePixelPos(uint2 pixel, out int2 result) {
-        float2 inter = (float2)pixel + float2(0.5f);
-        inter += gResamplePass.motionVectors[pixel] * gOutputDimensions;
-        result = (int2)inter;
-        return all(result >= 0) && all(result < gOutputDimensions);
-    }
 
     uint ind(uint2 pixel) {
         return pixel.y * gOutputDimensions.x + pixel.x;
