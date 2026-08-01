@@ -867,7 +867,8 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 }
                 curNEESample.path.incrementVertexIndex(); //it uses rayData.path which includes data abt type of light sampled, but its vertexIndex was only incremented at the hit that spawned this nee
                 if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
-                    if(kShiftMappingType == (uint)ShiftMappingType::Reconnection){
+                    if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
+                        r.X.k = 2;
                         r.X.J = rayData.sampleData.j_denom;
                     } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
                         if (shiftContext.rcVertexInd == 0) { // k = d case
@@ -922,6 +923,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / pre_rc_thp;
             if (r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg)) {
                 if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
+                    r.X.k = 2;
                     r.X.J = rayData.sampleData.j_denom;
                 } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
                     if (shiftContext.rcVertexInd == 0) { // we didn't find an rc vertex yet

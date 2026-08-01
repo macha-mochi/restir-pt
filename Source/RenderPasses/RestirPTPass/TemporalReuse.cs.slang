@@ -115,9 +115,9 @@ struct TemporalReusePass {
             {
                 HitInfo dstHit = HitInfo(temporalVBuffer[pixelLastFrame]);
                 ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.data.prevPosW, -temporalViewW[pixelLastFrame].xyz);
-                success = performReconnectionShift( ShiftMappingType::Reconnection, false, true,  // settings for the shift: reconnection, src is this frame and dst is last frame
+                success = computeShiftedSample(ShiftMappingType::Reconnection, false, true,  // settings for the shift: reconnection, src is this frame and dst is last frame
                     y1_SD, // vertex right before reconnection vert on the dst domain's path
-                    inputBuffer[ind(pixel)].X.rcVertex, 2, inputBuffer[ind(pixel)].X.path,        // information from the base path aka canonical sample
+                    inputBuffer[ind(pixel)].X,        // base path aka canonical sample
                     float3(1.f),                           // previous thp = 1
                     Y_lastFrame, inverse_jacobian, sg, d);  // out or inout variables
             } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
@@ -142,9 +142,9 @@ struct TemporalReusePass {
             {
                 HitInfo dstHit = HitInfo(vBuffer[pixel]);
                 ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[pixel].xyz);
-                shiftSucceeded = performReconnectionShift(ShiftMappingType::Reconnection, true, false, // settings for the shift: reconnection, no temporal src or dst
+                shiftSucceeded = computeShiftedSample(ShiftMappingType::Reconnection, true, false, // settings for the shift: reconnection, no temporal src or dst
                                              y1_SD, // vertex right before reconnection vert on the dst domain's path
-                                             temporalBuffer[ind(pixelLastFrame)].X.rcVertex, 2, temporalBuffer[ind(pixelLastFrame)].X.path, // information from the base path aka last frame's sample
+                                             temporalBuffer[ind(pixelLastFrame)].X, // base path aka last frame's sample
                                              float3(1.f), // previous thp = 1
                                              X_thisFrame, jacobian, sg, d); // out or inout variables
             } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)

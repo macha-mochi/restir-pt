@@ -105,9 +105,9 @@ struct SpatialReusePass {
                 {
                     HitInfo dstHit = HitInfo(vBuffer[neighbor]); // get hit info for the vertex right before rc shift vertex on this pixel
                     ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[neighbor].xyz);
-                    success = performReconnectionShift( ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
+                    success = computeShiftedSample(ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
                         y1_SD, // vertex right before reconnection vert on the dst domain's path
-                        inputBuffer[ind(pixel)].X.rcVertex, 2, inputBuffer[ind(pixel)].X.path,      // information from the base path aka canonical sample
+                        inputBuffer[ind(pixel)].X,      // base path aka canonical sample
                         float3(1.f),                         // previous thp = 1
                         Y_neighborDomain, inverse_jacobian, sg, d); // out or inout variables
                 } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
@@ -135,9 +135,9 @@ struct SpatialReusePass {
             {
                 HitInfo dstHit = HitInfo(vBuffer[pixel]);
                 ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[pixel].xyz);
-                shiftSucceeded = performReconnectionShift( ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
+                shiftSucceeded = computeShiftedSample(ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
                     y1_SD, // vertex right before reconnection vert on the dst domain's path
-                    inputBuffer[ind(neighbor)].X.rcVertex, 2, inputBuffer[ind(neighbor)].X.path,    // information from the base path aka neighbor's sample
+                    inputBuffer[ind(neighbor)].X,    // base path aka neighbor's sample
                     float3(1.f),                          // previous thp = 1
                     neighbor_curDomain, jacobian, sg, d); // out or inout variables
             } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
@@ -171,9 +171,9 @@ struct SpatialReusePass {
                         {
                             HitInfo dstHit = HitInfo(vBuffer[otherNeighbor]); // get hit info for the vertex right before rc shift vertex on this pixel
                             ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.getPosition(), -viewW[otherNeighbor].xyz);
-                            success = performReconnectionShift( ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
+                            success = computeShiftedSample(ShiftMappingType::Reconnection, false, false, // settings for the shift: reconnection, no temporal src or dst
                                 y1_SD, // vertex right before reconnection vert on the dst domain's path
-                                neighbor_curDomain.rcVertex, 2, neighbor_curDomain.path,   // information from the base path, which is in [pixel]'s domain
+                                neighbor_curDomain,   // information from the base path, which is in [pixel]'s domain
                                 float3(1.f), // previous thp = 1
                                 shifted, inverse_jacobian, sg, d); // out or inout variables
                         } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)

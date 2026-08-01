@@ -50,26 +50,33 @@ bool traceShadowRay(float3 origin, float3 dir, float distance) {
     }
 }
 
-/** Shifts a path from domain [src] to domain [dst] by reconnecting y_(k-1) in domain [dst] to x_k in domain [src].
+/** Shifts a path from domain [src] to domain [dst].
+
+This just does the reconnection step of reconnecting y_(k-1) in domain [dst] to x_k in domain [src].
+
+Preconditions if hybrid shift:
+User must provide a valid previous throughput for the path up to y_(k-1)
+Function assumes x(k-1), xk, y(k-1) are rough enough, and both paths have the same k, and lobe k-1 is present on both paths
 
 Procedure:
 Find bsdf * cos * bsdf * cos for offset path (y_(k-1) to x_k and then x_k to x_(k+1))
-Multiply by incomingRadiance of base path and potential replayed thp of previous vertices if using hybrid shift
+Multiply by incomingRadiance of base path and potential replayed thp of previous vertices if using hybrid shift.
 
 Notes:
 [y_sd] is originally y_(k-1)
 [jacobian] initially holds the denominator of the jacobian for the RC step of the shift
-[prevThp] should be 1 for the normal reconnection shift
+[prevThp] should be 1 for the normal reconnection shift, and be drawn from the result of random replayed paths if hybrid
+incomingRadiance might need to be re evaluated if k = d or temporal, TODO
 
 */
-bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool temporalDst, ShadingData y_sd, RCVertex x_k_rcVertex, uint rcVertexIndex, PathState x_path, float3 prevThp, out Sample Y, inout float jacobian, inout SampleGenerator sg, out ShiftDebugData d) {
+bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool temporalDst, ShadingData y_sd, Sample srcX, float3 prevThp, out Sample Y, inout float jacobian, inout SampleGenerator sg, out ShiftDebugData d) {
 
     // Create material instance at shading point.
     let lod1 = ExplicitLodTextureSampler(0.f);
     let y_kMinus1_mi = gScene.materials.getMaterialInstance(y_sd, lod1);
 
-    HitInfo rcHitInfo = HitInfo(x_k_rcVertex.packedHitInfo);
-    if (!rcHitInfo.isValid() || luminance(x_k_rcVertex.incomingRadiance) == 0.f) {
+    HitInfo rcHitInfo = HitInfo(srcX.rcVertex.packedHitInfo);
+    if (!rcHitInfo.isValid() || luminance(srcX.rcVertex.incomingRadiance) == 0.f) {
         return false; // can't do shift if x_k isn't valid. if incoming radiance is 0 the shifted path will have 0 contribution so we can fail it
         //this step will also exclude the k = d cases
     }
@@ -90,7 +97,7 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
     if (!traceShadowRay(y_kMinus1_rayOrigin, rcIncomingDir, length(toRCVert) - epsilon)) { // TODO / CAUTION: this is traced against current BVH / accel structure. in a dynamic scene this will cause bias.
         return false; // this shift is not valid if x_k is occluded from y_(k-1)
     }
-    float3 rcThp = y_kMinus1_mi.evalBSDF(y_sd, rcIncomingDir, x_k_rcVertex.prevSampledLobeType, sg);
+    float3 rcThp = y_kMinus1_mi.evalBSDF(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType, sg);
     float jacobian_denom = jacobian;
     if (shiftType == ShiftMappingType::Hybrid) {
         // jacobian numerator: solid angle pdf of y_(k-1) to x_k * G * solid angle pdf of x_k to x_(k+1)
@@ -119,20 +126,20 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
     //Continue to evaluate bsdf at x_k
     let lod2 = ExplicitLodTextureSampler(0.f);
     let x_k_mi = gScene.materials.getMaterialInstance(y_sd, lod2); // mi for y_k = x)k
-    float3 weight2 = x_k_mi.evalBSDF(y_sd, x_k_rcVertex.outgoingDir, x_k_rcVertex.sampledLobeType, sg); // bsdf * cos for y2
+    float3 weight2 = x_k_mi.evalBSDF(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType, sg); // bsdf * cos for y2
     if (any(isnan(weight2))) weight2 = float3(0, 0, 0);
     rcThp *= weight2;
-    float p_xk_xkPlus1 = x_k_mi.evalPdf(y_sd, x_k_rcVertex.outgoingDir, true);
+    float p_xk_xkPlus1 = x_k_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true);
     float misWeight = 1.f;
     if (shiftType == ShiftMappingType::Reconnection) {
-        if (rcVertexIndex == x_path.getVertexIndex() - 1) {
+        if (srcX.k == srcX.path.getVertexIndex() - 1) {
             float p_bsdf = p_xk_xkPlus1;
-            float p_nee = x_k_rcVertex.outgoingPdf;
+            float p_nee = srcX.rcVertex.outgoingPdf;
             d.bsdfpdf = p_bsdf;
             d.neepdf = p_nee;
-            if (x_path.isBSDFSampled()) {
+            if (srcX.path.isBSDFSampled()) {
                 misWeight = p_bsdf / (p_bsdf + p_nee);
-            } else if (x_path.isNEESampled()) {
+            } else if (srcX.path.isNEESampled()) {
                 misWeight = p_nee / (p_bsdf + p_nee);
             }
             d.misWeight = misWeight;
@@ -144,12 +151,12 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
         //  thp = prevThp * mis weight * re eval at y_k-1 * re eval at x_k * Li
         // light sampling terms should cancel in the jacobian, leaving it just p of y_k-1 to x_k * G
         //  but you need the nee pdf anyway for the mis weight. bsdf pdf is easily calc-able
-        if (rcVertexIndex == x_path.getVertexIndex() - 1) { // getVertexIndex will return index of the last vertex on the path x
+        if (srcX.k == srcX.path.getVertexIndex() - 1) { // getVertexIndex will return index of the last vertex on the path x
             float p_bsdf = p_xk_xkPlus1;
-            float p_nee = x_k_rcVertex.outgoingPdf;
-            if (x_path.isBSDFSampled()) {
+            float p_nee = srcX.rcVertex.outgoingPdf;
+            if (srcX.path.isBSDFSampled()) {
                 misWeight = p_bsdf / (p_bsdf + p_nee);
-            } else if (x_path.isNEESampled()) {
+            } else if (srcX.path.isNEESampled()) {
                 misWeight = p_nee / (p_bsdf + p_nee);
                 p_xk_xkPlus1 = p_nee;
             }
@@ -161,12 +168,13 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
     rcThp *= misWeight;
 
     // Find p_hat for shifted X
-    Y.p_hat = prevThp * rcThp * x_k_rcVertex.incomingRadiance; // CAUTION / TODO: we assume that incomingRadiance stays the same (that is, k < d and the rest of the path didnt become occluded temporally)
+    Y.p_hat = prevThp * rcThp * srcX.rcVertex.incomingRadiance; // CAUTION / TODO: we assume that incomingRadiance stays the same (that is, k < d and the rest of the path didnt become occluded temporally)
     // you will find shifted w_i afneter this method since we need to eval mis weight
-    Y.rcVertex = x_k_rcVertex;
-    Y.path = x_path;
-    // you don't care abt the seeds for reconnection
-    Y.k = 2;
+    Y.rcVertex = srcX.rcVertex;
+    Y.path = srcX.path;
+    Y.seed = srcX.seed;
+    Y.postRCSeed = srcX.postRCSeed;
+    Y.k = srcX.k;
     Y.J = jacobian * jacobian_denom; // restore jacobian numerator, which will be the jacobian denominator for paths where the shifted path becomes the base path
 
     bool success = jacobian != 0.f && luminance(Y.p_hat) != 0.f; // if jacobian = 0, or p hat is 0, w_i will be 0 so it'll be as if the shift failed
