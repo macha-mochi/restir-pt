@@ -98,7 +98,7 @@ struct SpatialReusePass {
             bool validNeighbor = getSpatialNeighbor(pixel, i, neighbor);
             if (validNeighbor) {
                 Sample Y_neighborDomain = {};
-                float inverse_jacobian = inputBuffer[ind(pixel)].J; // initialize to srcG, src is this pixel
+                float inverse_jacobian = inputBuffer[ind(pixel)].X.J; // initialize to srcG, src is this pixel
                 bool success = false;
                 ShiftDebugData d = {};
                 if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
@@ -118,10 +118,8 @@ struct SpatialReusePass {
             }
         }
         float w_i = (m_num / m_den) * luminance(inputBuffer[ind(pixel)].X.p_hat) * inputBuffer[ind(pixel)].W_X; // jacobian is 1 bc alr in right domain
-        if(isnan(w_i)) w_i = 0.f;
-        if (r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg)) {
-            r.copySampleGenerationInfo(inputBuffer[ind(pixel)]);
-        }
+        if (isnan(w_i)) w_i = 0.f;
+        r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg);
 
         // Spatial passes
         for(int i = 0; i < kNumSpatialNeighbors; i++){
@@ -130,7 +128,7 @@ struct SpatialReusePass {
 
             Sample neighbor_curDomain = {};
             float w_i = 0.f;
-            float jacobian = inputBuffer[ind(neighbor)].J; // denom of jacobian of shifting from neighbor into [pixel]'s domain, |T(X)|
+            float jacobian = inputBuffer[ind(neighbor)].X.J; // denom of jacobian of shifting from neighbor into [pixel]'s domain, |T(X)|
             bool shiftSucceeded = false;
             ShiftDebugData d = {};
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
@@ -148,7 +146,7 @@ struct SpatialReusePass {
 
             float newJ = 0.f;
             if (shiftSucceeded) {
-                newJ = jacobian * inputBuffer[ind(neighbor)].J;
+                newJ = jacobian * inputBuffer[ind(neighbor)].X.J;
                 float m_num = inputBuffer[ind(neighbor)].c * luminance(inputBuffer[ind(neighbor)].X.p_hat) / jacobian; // i is the domain that [preshiftNeighbor] came from
                 float m_den = m_num;
                 // process canonical candidate for m_den
@@ -194,8 +192,6 @@ struct SpatialReusePass {
             neighbor_curDomain.w_i = w_i;
             if (r.updateReservoir(neighbor_curDomain, w_i, inputBuffer[ind(neighbor)].c, sg))
             {
-                r.copySampleGenerationInfo(inputBuffer[ind(neighbor)]);
-                r.J = newJ;
                 debugData.dummy = 2.f;
             }
         }

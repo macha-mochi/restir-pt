@@ -7,13 +7,22 @@ struct Sample {
     float3 p_hat; // aka f, the realized contribution of this sample (no pdfs multiplied yet)
     float w_i; // w_i = (resampling MIS weight m_i) * (target function evaluated for X_i) / (pdf of sampling X_i), where reciprocal of pdf of X_i is just W_Xi
     RCVertex rcVertex; // struct with reconnection vertex data
-    PathState path; // we will only use the vertex index and nee type fields
+    PathState path;    // we will only use the vertex index and nee type fields
+    uint seed;
+    uint postRCSeed; // only used if we need to replay the path after RC, temporally
+    uint k;  // rcVertexIndex. 0 is camera, 1 is primary hit, etc. This should be >= 2
+    float J; // holds denominator of jacobian calc'd from base path, so we don't have to recompute when resampling
 
     __init() {
         this.p_hat = { 0.f, 0.f, 0.f };
         this.w_i = 0.f;
         this.rcVertex = {};
         this.path = {};
+
+        seed = 0;
+        postRCSeed = 0;
+        k = 0;
+        J = 0;
     }
 
     __init(float3 p_hat, float w_i, RCVertex rcv, PathState p) {
@@ -21,6 +30,22 @@ struct Sample {
         this.w_i = w_i;
         this.rcVertex = rcv;
         this.path = p;
+
+        seed = 0;
+        postRCSeed = 0;
+        k = 0;
+        J = 0;
+    }
+
+    __init(float3 p_hat, float w_i, RCVertex rcv, PathState p, uint seed, uint postRCSeed, uint k, float J) {
+        this.p_hat = p_hat;
+        this.w_i = w_i;
+        this.rcVertex = rcv;
+        this.path = p;
+        this.seed = seed;
+        this.postRCSeed = postRCSeed;
+        this.k = k;
+        this.J = J;
     }
 
     static bool isNull(Sample X) {
@@ -35,22 +60,11 @@ struct Reservoir
     float w_sum; //sum of all lowercase w seen so far, for use in resampling
     uint c; //cap at 20
 
-    // Information that needs to be initialized by caller in path tracing loop (Sample Generation Info)
-    PRNGSeed seed;
-    PRNGSeed postRCSeed;    // only used if we need to replay the path after RC, temporally
-    uint rcVertexIndex; //0 is camera, 1 is primary hit, etc. This should be >= 2
-    float J; // holds denominator of jacobian calc'd from base path, so we don't have to recompute when resampling
-
     __init() {
         X = {};
         W_X = 1.f;
         w_sum = 0;
         c = 0;
-
-        seed = {uint2(0, 0), 0};
-        postRCSeed = {uint2(0, 0), 0};
-        rcVertexIndex = 0;
-        J = 0.f;
     }
 
     [mutating] //Returns true if sample was replaced, false ow
@@ -70,13 +84,6 @@ struct Reservoir
         W_X = w_sum / luminance(X.p_hat); // if we got to this point, w_i_new is non zero meaning mi, p_hat, and W_X were all nonzero. so not a null sample
 
         return updateSample;
-    }
-    [mutating]
-    void copySampleGenerationInfo(Reservoir src) {
-        seed = src.seed;
-        postRCSeed = src.seed;
-        rcVertexIndex = src.rcVertexIndex;
-        J = src.J;
     }
 };
 float luminance(float3 vec) {

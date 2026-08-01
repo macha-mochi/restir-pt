@@ -302,8 +302,6 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     program->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
     program->addDefine("USE_SPATIAL", mUseSpatialReuse ? "1" : "0");
     program->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0");
-    bool firstPass = isTemporal || (!mUseTemporalReuse);
-    program->addDefine("IS_FIRST_PASS", firstPass ? "1" : "0");
     bool lastPass = (isTemporal && !mUseSpatialReuse);
     program->addDefine("IS_LAST_PASS", lastPass ? "1" : "0");
 
@@ -586,7 +584,6 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
              {"USE_SPATIAL", mUseSpatialReuse ? "1" : "0"},
              {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
              {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"},
-             {"IS_FIRST_PASS", "0"},
              {"IS_LAST_PASS", "0"}}
         );
         mpTemporalReusePass = createComputePass(
@@ -595,7 +592,6 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
              {"USE_SPATIAL", mUseSpatialReuse ? "1" : "0"},
              {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
              {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"},
-             {"IS_FIRST_PASS", "0"},
              {"IS_LAST_PASS", "0"}}
         );
     }

@@ -661,7 +661,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         return;
     }
 
-    if (kShiftMappingType == (uint)ShiftMappingType::Hybrid && kMinus1_roughness >= kHybridShiftRoughnessThreshold) {
+    if (kShiftMappingType == (uint)ShiftMappingType::Hybrid && kMinus1_roughness >= kHybridShiftRoughnessThreshold) { //single vertex roughness threshold from restir pt enhanced
         float3 toX_k = sd.posW - x_kMinus1;
         float3 dirToX_k = normalize(toX_k);
         float kMinus1_k = kMinus1_to_k_pdf * abs(dot(sd.getOrientedFaceNormal(), -dirToX_k) / dot(toX_k, toX_k));
@@ -829,7 +829,6 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             shiftContext.primaryRayFootprint = temp;
         } else {
             shiftContext.rcVertexInd = 2;
-            r.rcVertexIndex = 2;
         }
 
         //Add primary hit to debug path
@@ -869,29 +868,26 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 curNEESample.path.incrementVertexIndex(); //it uses rayData.path which includes data abt type of light sampled, but its vertexIndex was only incremented at the hit that spawned this nee
                 if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
                     if(kShiftMappingType == (uint)ShiftMappingType::Reconnection){
-                        r.J = rayData.sampleData.j_denom;
+                        r.X.J = rayData.sampleData.j_denom;
                     } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
                         if (shiftContext.rcVertexInd == 0) { // k = d case
                             // if we have not yet selected a rc vertex, we force reconnection to the light vertex.
-                            r.rcVertexIndex = rayData.path.getVertexIndex() + 1;
+                            r.X.k = rayData.path.getVertexIndex() + 1;
                             // TODO / CAUTION: figure out a better way to handle this, pass info needed to re-eval the light into resampling shader.
                             //for now we'll just have paths that couldn't find a good RC vertex before their nee vertex be unshiftable.
                             r.X.rcVertex.prevSampledLobeType = (uint)LobeType::All; // and do this to flag that this is a case where we didn't find a good rc vert until litr the last one
                             r.X.rcVertex.sampledLobeType = (uint)LobeType::All;
                             r.X.path.incrementVertexIndex(); //vertex index was d-1 when we created this sample
-                            r.J = rayData.sampleData.nee_pdf * rayData.sampleData.nee_g; // this is handled the way the restir enhanced paper says to. p of x_(k-1) to k is just pdf of choosing x_k light vertex, we don't include p of x_k to x_(k+1) bc x_(k+1) doesn't exist
+                            r.X.J = rayData.sampleData.nee_pdf * rayData.sampleData.nee_g; // this is handled the way the restir enhanced paper says to. p of x_(k-1) to k is just pdf of choosing x_k light vertex, we don't include p of x_k to x_(k+1) bc x_(k+1) doesn't exist
                         } else {
-                            r.rcVertexIndex = shiftContext.rcVertexInd;
-                            if (rayData.path.getVertexIndex() == shiftContext.rcVertexInd) { // k = d-1 case
-                                r.J = rayData.sampleData.j_denom * rayData.sampleData.nee_pdf; // we use pdf of choosing our nee sample in solid angle for p(k to k+1)
-                            } else {
-                                r.J = rayData.sampleData.j_denom * rayData.pdf; // normal (k < d) case
-                            }
+                            r.X.k = shiftContext.rcVertexInd;
+                            r.X.J = rayData.sampleData.j_denom * r.X.rcVertex.outgoingPdf;
+                            // in k = d-1 case: rcVertex.outgoingPdf is just nee_pd in solid angle for p(k to k+1). and in normal k < d case, rcVertex.outgoingPdf is the normal bsdf pdf
                         }
                     }
 
                     debugPath.numNonCameraVertices = depth + 1; // technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
-                    debugPath.rcIndex = r.rcVertexIndex;
+                    debugPath.rcIndex = r.X.k;
                 }
             }
             // Clear NEE sample data in preparation for sampleNEE to be called again within handleHit (if scatter ray hits).
@@ -926,10 +922,15 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / pre_rc_thp;
             if (r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg)) {
                 if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
-                    r.J = rayData.sampleData.j_denom;
+                    r.X.J = rayData.sampleData.j_denom;
                 } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
-                    r.rcVertexIndex = shiftContext.rcVertexInd == 0 ? rayData.path.getVertexIndex() : shiftContext.rcVertexInd;
-                    r.J = rayData.sampleData.j_denom * rayData.pdf;
+                    if (shiftContext.rcVertexInd == 0) { // we didn't find an rc vertex yet
+                        r.X.k = rayData.path.getVertexIndex(); //k = d case! TODO need to deal w this
+                        r.X.J = rayData.pdf; //i think this might be wrong?? but we dont have a better way rn bc its the env map, which doesnst have x(k+1) or a G term
+                    } else {
+                        r.X.k = shiftContext.rcVertexInd;
+                        r.X.J = rayData.sampleData.j_denom * r.X.rcVertex.outgoingPdf; //j_denom alr calculated
+                    }
                 }
 
                 if (!rayData.path.sampledEnvMap()) {
@@ -937,7 +938,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 } //if we did hit the env map, path flags are alr set
 
                 debugPath.numNonCameraVertices = depth + 1;
-                debugPath.rcIndex = r.rcVertexIndex;
+                debugPath.rcIndex = r.X.k;
             }
 
             if (!rayData.path.isTerminated()) {

@@ -69,28 +69,6 @@ struct LightSample
     float g = 0; ///< Geometry term for the light sample, only valid if the light sample is from an emissive triangle
 };
 
-/** Convenience struct for holding info about the uints needed to seed a SampleGenerator.
- */
-struct PRNGSeed
-{
-    uint2 pixel;
-    uint sampleNumber;
-
-    #ifndef HOST_CODE
-
-    __init(){
-        pixel = uint2(0, 0);
-        sampleNumber = 0;
-    }
-
-    __init(uint2 pix, uint sampleNum){
-        pixel = pix;
-        sampleNumber = sampleNum;
-    }
-
-    #endif
-};
-
 /**
  Describes a path as a sequence of vertices, used by the PathViewer
 */

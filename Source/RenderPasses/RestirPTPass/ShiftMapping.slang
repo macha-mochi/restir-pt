@@ -5,13 +5,11 @@ import Scene.Raytracing;
 import Utils.Sampling.SampleGenerator;
 
 struct ShiftDebugData {
-    float dstG;
     float misWeight;
     float bsdfpdf;
     float neepdf;
 
     __init() {
-        dstG = 0;
         misWeight = 0;
         bsdfpdf = 0;
         neepdf = 0;
@@ -93,12 +91,12 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
         return false; // this shift is not valid if x_k is occluded from y_(k-1)
     }
     float3 rcThp = y_kMinus1_mi.evalBSDF(y_sd, rcIncomingDir, x_k_rcVertex.prevSampledLobeType, sg);
+    float jacobian_denom = jacobian;
     if (shiftType == ShiftMappingType::Hybrid) {
         // jacobian numerator: solid angle pdf of y_(k-1) to x_k * G * solid angle pdf of x_k to x_(k+1)
         // we first get the first pdf / j_denom here
-        float j_denom = jacobian;
         float p_ykMinus1_xk = y_kMinus1_mi.evalPdf(y_sd, rcIncomingDir, true);
-        jacobian = p_ykMinus1_xk / j_denom;
+        jacobian = p_ykMinus1_xk / jacobian_denom;
     }
     if (any(isnan(rcThp))) rcThp = float3(0, 0, 0);
 
@@ -112,9 +110,7 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
     // Calculate jacobians
     float dstG = abs(dot(y_sd.faceN, -rcIncomingDir)) / dot(toRCVert, toRCVert);
     if (shiftType == ShiftMappingType::Reconnection) {
-        float srcG = jacobian;
-        jacobian = dstG / srcG; // jacobian: ratio of cos * dist^2, for y1->x2 / x1->x2
-        d.dstG = dstG;
+        jacobian = dstG / jacobian_denom; // jacobian: ratio of cos * dist^2, for y1->x2 / x1->x2. jacobian_denom is srcG
     } else if(shiftType == ShiftMappingType::Hybrid) {
         // we now have the first p * G / j_denom
         jacobian *= dstG;
@@ -169,6 +165,9 @@ bool performReconnectionShift(ShiftMappingType shiftType, bool temporalSrc, bool
     // you will find shifted w_i afneter this method since we need to eval mis weight
     Y.rcVertex = x_k_rcVertex;
     Y.path = x_path;
+    // you don't care abt the seeds for reconnection
+    Y.k = 2;
+    Y.J = jacobian * jacobian_denom; // restore jacobian numerator, which will be the jacobian denominator for paths where the shifted path becomes the base path
 
     bool success = jacobian != 0.f && luminance(Y.p_hat) != 0.f; // if jacobian = 0, or p hat is 0, w_i will be 0 so it'll be as if the shift failed
     return success;

@@ -108,7 +108,7 @@ struct TemporalReusePass {
         float m_den = m_num;
         if (pixelHasValidTemporalPos) { // try to shift input buffer sample into last frame
             Sample Y_lastFrame = {};
-            float inverse_jacobian = inputBuffer[ind(pixel)].J; // initialize to srcG, src is this pixel
+            float inverse_jacobian = inputBuffer[ind(pixel)].X.J; // initialize to srcG, src is this pixel
             bool success = false;
             ShiftDebugData d = {};
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
@@ -130,14 +130,12 @@ struct TemporalReusePass {
         debugData.m_den = m_den;
         float w_i = (m_num / m_den) * luminance(inputBuffer[ind(pixel)].X.p_hat) * inputBuffer[ind(pixel)].W_X; // jacobian is 1 bc alr in right domain
         if (isnan(w_i)) w_i = 0.f;
-        if (r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg)) {
-            r.copySampleGenerationInfo(inputBuffer[ind(pixel)]);
-        }
+        r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg);
             
         // Temporal
         if (pixelHasValidTemporalPos) {
             Sample X_thisFrame = {};
-            float jacobian = temporalBuffer[ind(pixelLastFrame)].J; // this is the denom of jacobian of shifting last frame's sample into this domain, so this is the forward jacobian
+            float jacobian = temporalBuffer[ind(pixelLastFrame)].X.J; // this is the denom of jacobian of shifting last frame's sample into this domain, so this is the forward jacobian
             bool shiftSucceeded = false;
             ShiftDebugData d = {};
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
@@ -159,10 +157,7 @@ struct TemporalReusePass {
             debugData.neeSampled = p.isNEESampled();
 
             float w_i = 0.f;
-            float newJ = 0.f;
             if (shiftSucceeded) {
-                newJ = jacobian * temporalBuffer[ind(pixelLastFrame)].J;
-                
                 float m_num = temporalBuffer[ind(pixelLastFrame)].c * luminance(temporalBuffer[ind(pixelLastFrame)].X.p_hat) / jacobian;
                 float m_den = m_num;
                 // process new/canonical domain for m_den
@@ -177,11 +172,7 @@ struct TemporalReusePass {
             }
             // update reservoir streaming (in new buffer)
             X_thisFrame.w_i = w_i;
-            if (r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg))
-            {
-                r.copySampleGenerationInfo(temporalBuffer[ind(pixelLastFrame)]);
-                r.J = newJ; //overwrite old jacobian info tho
-            }
+            r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg);
         }
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
