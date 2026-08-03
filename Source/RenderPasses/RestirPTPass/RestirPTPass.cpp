@@ -41,6 +41,7 @@ const char kReflectTypesShaderFile[] = "RenderPasses/RestirPTPass/ReflectTypes.c
 const char kCandidateGenShaderFile[] = "RenderPasses/RestirPTPass/RestirGenCandidates.rt.slang";
 const char kSpatialComputeShaderFile[] = "RenderPasses/RestirPTPass/SpatialReuse.cs.slang";
 const char kTemporalComputeShaderFile[] = "RenderPasses/RestirPTPass/TemporalReuse.cs.slang";
+const char kRetracePathsShaderFile[] = "RenderPasses/RestirPTPass/RetracePaths.rt.slang";
 const char kPathViewerShaderFile[] = "RenderPasses/RestirPTPass/PathViewer.cs.slang";
 
 //CANDIDATE GENERATION SETTINGS
@@ -79,7 +80,7 @@ RestirPTPass::RestirPTPass(ref<Device> pDevice, const Properties& props) : Rende
     parseProperties(props);
 
     // Create a sample generator.
-    mpSampleGenerator = SampleGenerator::create(mpDevice, SAMPLE_GENERATOR_UNIFORM);
+    mpSampleGenerator = SampleGenerator::create(mpDevice, SAMPLE_GENERATOR_TINY_UNIFORM);
     FALCOR_ASSERT(mpSampleGenerator);
 
     mOutputReservoirID = 0;
@@ -209,7 +210,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mTracer.pProgram->addDefines(getValidResourceDefines(kInputChannels, renderData));
     mTracer.pProgram->addDefines(getValidResourceDefines(kOutputChannels, renderData)); //it doesn't need this bc the tracer is not the one outputting final color
 
-    // Prepare program vars. This may trigger shader compilation.
+    // Prepare program vars (for mTracer). This may trigger shader compilation.
     // The program should have all necessary defines set at this point.
     if (!mTracer.pVars)
         prepareVars();
@@ -247,6 +248,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];
     mpReservoirBuffers[mOutputReservoirID]->setName("Restir Candidate Output Buffer");
     var["gDI_BGBuffer"] = mpDiBgBuffer;
+    var["gReconnectionDataBuffer"] = mpReconnectionDataBuffer;
 
     uint elementCount = targetDim.x * targetDim.y;
     if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
@@ -272,12 +274,22 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     //SPATIOTEMPORAL RESAMPLING
     if (mUseTemporalReuse && mFrameCount > 0) //no temporal history yet on frame 0
     {
+        // RANDOM REPLAY PATH RETRACE (hybrid only)
+        if (mShiftMappingType == ShiftMappingType::Hybrid)
+        {
+            PathRetracePass(pRenderContext, renderData, true);
+        }
         PathReusePass(pRenderContext, renderData, true);
         mInputReservoirID = mOutputReservoirID;
         mOutputReservoirID = 1 - mOutputReservoirID;
     }
     if (mUseSpatialReuse)
     {
+        // RANDOM REPLAY PATH RETRACE (hybrid only)
+        if (mShiftMappingType == ShiftMappingType::Hybrid)
+        {
+            PathRetracePass(pRenderContext, renderData, false);
+        }
         PathReusePass(pRenderContext, renderData, false);
         mInputReservoirID = mOutputReservoirID;
         mOutputReservoirID = 1 - mOutputReservoirID;
@@ -292,6 +304,53 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mFrameCount++;
 }
 
+// Adds defines, prepares vars, binds resources and executes for path retrace passes
+void RestirPTPass::PathRetracePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal) {
+    //Defines
+    mReplayTracer.pProgram->addDefine("USE_IMPORTANCE_SAMPLING", mUseImportanceSampling ? "1" : "0");
+    mReplayTracer.pProgram->addDefine("USE_SPATIAL", mUseSpatialReuse ? "1" : "0");
+    mReplayTracer.pProgram->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0");
+    mReplayTracer.pProgram->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
+    mReplayTracer.pProgram->addDefines(getValidResourceDefines(kInputChannels, renderData)); // you only need vbuffer and vieww
+
+    //Prepare vars (basically copy of mTracer prepareVars() method)
+    if (isTemporal && !mReplayTracer.pVarsTemporal || !isTemporal && !mReplayTracer.pVarsSpatial)
+    {
+        // Configure program.
+        mReplayTracer.pProgram->addDefines(mpSampleGenerator->getDefines());
+        mReplayTracer.pProgram->setTypeConformances(mpScene->getTypeConformances());
+
+        if (isTemporal && !mReplayTracer.pVarsTemporal)
+        {
+            // Create program variables for the current program.
+            // This may trigger shader compilation. If it fails, throw an exception to abort rendering.
+            mReplayTracer.pVarsTemporal = RtProgramVars::create(mpDevice, mReplayTracer.pProgram, mReplayTracer.pBindingTableTemporal);
+
+            // Bind utility classes into shared data.
+            auto varT = mReplayTracer.pVarsTemporal->getRootVar();
+            mpSampleGenerator->bindShaderData(varT);
+        }
+        if (!isTemporal && !mReplayTracer.pVarsSpatial)
+        {
+            mReplayTracer.pVarsSpatial = RtProgramVars::create(mpDevice, mReplayTracer.pProgram, mReplayTracer.pBindingTableSpatial);
+
+            auto varS = mReplayTracer.pVarsSpatial->getRootVar();
+            mpSampleGenerator->bindShaderData(varS);
+        }
+    }
+
+    ref<RtProgramVars> pVars = isTemporal ? mReplayTracer.pVarsTemporal : mReplayTracer.pVarsSpatial;
+    auto var = pVars->getRootVar();
+    var["CB"]["gFrameCount"] = mFrameCount;
+    var["vBuffer"] = renderData.getTexture(kInputVBuffer);
+    var["viewW"] = renderData.getTexture(kInputViewDir);
+    var["outputColor"] = renderData.getTexture(kOutputColor);
+    var["gReconnectionData"] = mpReconnectionDataBuffer;
+
+    mpScene->raytrace(pRenderContext, mReplayTracer.pProgram.get(), pVars, uint3(targetDim, 1));
+}
+
+// Adds defines, binds resources, and executes path reuse passes
 void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal)
 {
     // Set shader vars, and bind i/o buffers. don't add new defines here bc the compute pass is already set after you created it when you
@@ -481,9 +540,6 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mTracer.pBindingTable = nullptr;
     mTracer.pVars = nullptr;
     mFrameCount = 0;
-    mUsePathViewer = false;
-    mpPathDataBuffer = nullptr;
-    mMousePixelPos = uint2(0, 0);
     resetLighting();
     for (int i = 0; i < 3; i++)
     {
@@ -492,6 +548,16 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mpTemporalVBuffer = nullptr;
     mpTemporalViewDir = nullptr;
     mpDiBgBuffer = nullptr;
+    mpReconnectionDataBuffer = nullptr;
+    mReplayTracer.pProgram = nullptr;
+    mReplayTracer.pBindingTableTemporal = nullptr;
+    mReplayTracer.pVarsTemporal = nullptr;
+    mReplayTracer.pBindingTableSpatial = nullptr;
+    mReplayTracer.pVarsSpatial = nullptr;
+
+    mUsePathViewer = false;
+    mpPathDataBuffer = nullptr;
+    mMousePixelPos = uint2(0, 0);
     
 
     //Set the scene to the new one
@@ -503,8 +569,17 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         {
             logWarning("RestirPTPass: This render pass does not support custom primitives.");
         }
+        if (mpScene->hasGeometryType(Scene::GeometryType::Curve))
+        {
+            logWarning("RestirPTPass: This render pass does not support curves");
+        }
 
-        // Create ray tracing program.
+        if (mpScene->hasGeometryType(Scene::GeometryType::SDFGrid))
+        {
+            logWarning("RestirPTPass: This render pass does not support sdfs");
+        }
+
+        // Create ray tracing program for candidate gen
         ProgramDesc desc;
         desc.addShaderModules(mpScene->getShaderModules());
         desc.addShaderLibrary(kCandidateGenShaderFile);
@@ -544,17 +619,57 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
             );
         }
 
-        if (mpScene->hasGeometryType(Scene::GeometryType::Curve))
-        {
-            logWarning("RestirPTPass: This render pass does not support curves");
-        }
-
-        if (mpScene->hasGeometryType(Scene::GeometryType::SDFGrid))
-        {
-            logWarning("RestirPTPass: This render pass does not support sdfs");
-        }
-
         mTracer.pProgram = Program::create(mpDevice, desc, mpScene->getSceneDefines());
+
+        // Create ray tracing programs for path retrace.
+        ProgramDesc rDesc;
+        rDesc.addShaderModules(mpScene->getShaderModules());
+        rDesc.addShaderLibrary(kRetracePathsShaderFile);
+        rDesc.setMaxPayloadSize(48u); // this payload is pretty small, but this is loose bound
+        rDesc.setMaxAttributeSize(mpScene->getRaytracingMaxAttributeSize());
+        rDesc.setMaxTraceRecursionDepth(kMaxRecursionDepth);
+
+        mReplayTracer.pBindingTableTemporal = RtBindingTable::create(1, 1, mpScene->getGeometryCount());
+        auto& tsbt = mReplayTracer.pBindingTableTemporal;
+        tsbt->setRayGen(rDesc.addRayGen("rayGenTemporal"));
+        auto scatterMissShader = rDesc.addMiss("scatterMiss");
+        tsbt->setMiss(0, scatterMissShader);
+        mReplayTracer.pBindingTableSpatial = RtBindingTable::create(1, 1, mpScene->getGeometryCount());
+        auto& ssbt = mReplayTracer.pBindingTableSpatial;
+        ssbt->setRayGen(rDesc.addRayGen("rayGenSpatial"));
+        ssbt->setMiss(0, scatterMissShader);
+
+        if (mpScene->hasGeometryType(Scene::GeometryType::TriangleMesh))
+        {
+            auto hitGroup = rDesc.addHitGroup("scatterTriangleMeshClosestHit", "scatterTriangleMeshAnyHit");
+            tsbt->setHitGroup(
+                0,
+                mpScene->getGeometryIDs(Scene::GeometryType::TriangleMesh),
+                hitGroup
+            );
+            ssbt->setHitGroup(
+                0,
+                mpScene->getGeometryIDs(Scene::GeometryType::TriangleMesh),
+                hitGroup
+            );
+        }
+
+        if (mpScene->hasGeometryType(Scene::GeometryType::DisplacedTriangleMesh))
+        {
+            auto hitGroup = rDesc.addHitGroup("scatterDisplacedTriangleMeshClosestHit", "", "displacedTriangleMeshIntersection");
+            tsbt->setHitGroup(
+                0,
+                mpScene->getGeometryIDs(Scene::GeometryType::DisplacedTriangleMesh),
+                hitGroup
+            );
+            ssbt->setHitGroup(
+                0,
+                mpScene->getGeometryIDs(Scene::GeometryType::DisplacedTriangleMesh),
+                hitGroup
+            );
+        }
+
+        mReplayTracer.pProgram = Program::create(mpDevice, rDesc, mpScene->getSceneDefines());
 
         // Create the resampling compute passes here since we needed mpScene
         // Helper for creating compute passes.
@@ -597,6 +712,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     }
 }
 
+// does it for mTracer only!
 void RestirPTPass::prepareVars()
 {
     FALCOR_ASSERT(mpScene);
@@ -750,6 +866,11 @@ void RestirPTPass::prepareResources(RenderContext* pRenderContext, const RenderD
     {
         mpDiBgBuffer = mpDevice->createStructuredBuffer(var["color"], elementCount);
         mpDiBgBuffer->setName("Restir DI_BG_Buffer");
+    }
+    if (!mpReconnectionDataBuffer || mpReconnectionDataBuffer->getElementCount() < elementCount)
+    {
+        mpReconnectionDataBuffer = mpDevice->createStructuredBuffer(var["rcData"], elementCount);
+        mpReconnectionDataBuffer->setName("Restir Reconnection Data Buffer");
     }
     if (!mpSpatialOffsetBuffer || mpSpatialOffsetBuffer->getElementCount() < elementCount * mNumSpatialNeighbors)
     {

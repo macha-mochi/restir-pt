@@ -13,6 +13,7 @@ target_sources(RestirPTPass PRIVATE
     TemporalReuse.cs.slang
     PathViewer.cs.slang
     PathState.slang
+    RetracePaths.rt.slang
 )
 
 target_copy_shaders(RestirPTPass RenderPasses/RestirPTPass)

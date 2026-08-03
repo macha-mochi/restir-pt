@@ -15,6 +15,26 @@ FALCOR_ENUM_INFO(ShiftMappingType, {
 });
 FALCOR_ENUM_REGISTER(ShiftMappingType);
 
+/**
+Struct to store info needed for shift mappings, such as replayed throughput that we get from path retrace pass
+*/
+struct ReconnectionData
+{
+    uint k;
+    uint seed;
+    uint temporalSeed;
+    float3 replayedThp;
+
+    #ifndef HOST_CODE
+    __init(){
+        k = 0;
+        seed = 0;
+        temporalSeed = 0;
+        replayedThp = float3(0.f);
+    }
+    #endif
+};
+
 /** A struct to store info needed to reconstruct a hit for reconnection shifts
  */
 struct RCVertex

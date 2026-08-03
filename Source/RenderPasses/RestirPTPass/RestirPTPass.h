@@ -69,6 +69,7 @@ private:
     bool prepareLighting(RenderContext* pRenderContext);
     void prepareResources(RenderContext* pRenderContext, const RenderData& renderData);
     void PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData);
+    void PathRetracePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
     void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
 
     // Internal state
@@ -87,7 +88,7 @@ private:
     /// Use importance sampling for materials.
     bool mUseImportanceSampling = true;
     /// Type of shift mapping used
-    ShiftMappingType mShiftMappingType = ShiftMappingType::Reconnection;
+    ShiftMappingType mShiftMappingType = ShiftMappingType::Hybrid;
     /// Whether to do spatial reuse
     bool mUseSpatialReuse = true;
     /// Number of spatial neighbors per pixel
@@ -109,6 +110,15 @@ private:
         ref<RtBindingTable> pBindingTable;
         ref<RtProgramVars> pVars;
     } mTracer;
+    // Raytracing programs for hybrid shift random replay passes
+    struct
+    {
+        ref<Program> pProgram;
+        ref<RtBindingTable> pBindingTableTemporal;
+        ref<RtProgramVars> pVarsTemporal;
+        ref<RtBindingTable> pBindingTableSpatial;
+        ref<RtProgramVars> pVarsSpatial;
+    } mReplayTracer;
 
     //Resources
     ref<Buffer> mpReservoirBuffers[3]; ///< Length 3 array containing buffers of path reservoirs: last frame's final samples, this frame's new / current best samples, and an output buffer to hold resampling results
@@ -120,6 +130,7 @@ private:
 
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
     ref<Buffer> mpSpatialOffsetBuffer; ///< Buffer of size (elementCount * numSpatialNeighbors per pixel) storing the amount to offset a pixel by to get its neighbor
+    ref<Buffer> mpReconnectionDataBuffer; ///< Stores data needed for RC like random replayed thp (amongst other things tba)
 
     //Compute passes
     ref<ComputePass> mpReflectTypes; /// Dummy compute pass for preparing resources of the right type

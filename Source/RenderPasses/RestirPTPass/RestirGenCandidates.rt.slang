@@ -74,6 +74,7 @@ Texture2D<float2> gMotionVectors; // Not used in this shader
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> gReservoirBuffer;
 RWStructuredBuffer<float3> gDI_BGBuffer;
+RWStructuredBuffer<ReconnectionData> gReconnectionDataBuffer; // contains data that will be used for random replay later
 
 RWTexture2D<float4> outputColor;
 
@@ -104,10 +105,10 @@ struct ShadowRayData
 };
 
 struct DebugData {
-    uint c;
+    float3 preRcThp;
 
     __init() {
-        c = 0;
+        preRcThp = float3(1.f);
     }
 }
 
@@ -176,14 +177,15 @@ struct ScatterRayData
     float path_pdf;   ///< Current path pdf (just multiplying) in terms of solid angle (changed from area)
     SampleData sampleData;
 
-    SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
+    SampleGenerator sg;
+    SampleGenerator sgScatterRays; ///< Per-ray state for the sample generator (up to 16B).
 
     DebugData d;
 
     /**
      * Initializes ray payload with default parameters.
      */
-    __init(SampleGenerator sg)
+    __init(SampleGenerator sg, SampleGenerator sgScatterRays)
     {
         path = {};
         path.setActive();
@@ -192,6 +194,7 @@ struct ScatterRayData
         this.origin = float3(0, 0, 0);
         this.direction = float3(0, 0, 0);
         this.sg = sg;
+        this.sgScatterRays = sgScatterRays;
 
         this.p_hat_thp = float3(1, 1, 1);
         this.path_pdf = 1.f;
@@ -324,7 +327,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
 
     // Sample material.
     BSDFSample bsdfSample;
-    if (mi.sample(sd, rayData.sg, bsdfSample, kUseImportanceSampling))
+    if (mi.sample(sd, rayData.sgScatterRays, bsdfSample, kUseImportanceSampling))
     {
         rayData.origin = rayOrigin;
         if (!isCurveHit && bsdfSample.isLobe(LobeType::Transmission))
@@ -333,6 +336,8 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         }
         rayData.normal = sd.getOrientedFaceNormal();
         rayData.pdf = bsdfSample.pdf;
+        rayData.path.setTransmission(bsdfSample.isLobe(LobeType::Transmission));
+        rayData.path.setSpecular(bsdfSample.isLobe(LobeType::Specular));
         rayData.path.setDelta(bsdfSample.isLobe(LobeType::Delta));
         rayData.direction = bsdfSample.wo;
         rayData.roughness = mi.getProperties(sd).roughness;
@@ -793,13 +798,15 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         let lod = ExplicitLodTextureSampler(0.f);
         let mi = gScene.materials.getMaterialInstance(sd, lod);
 
-        // Create sample generator.
-        SampleGenerator sg = SampleGenerator(pixel, gFrameCount);
+        // Create sample generators.
+        SampleGenerator sg = SampleGenerator(pixel, gFrameCount * 4);
+        SampleGenerator sgScatterRays = SampleGenerator(pixel, gFrameCount * 4 + 1);
+        uint sgScatterRaysState = sgScatterRays.rng.state; //TODO: if this was default uniform sg store as uint4
 
         // Advance the generator to the first available dimension.
         // TODO: This is potentially expensive. We may want to store/restore the state from memory if it becomes a problem.
-        for (uint i = 0; i < gPRNGDimension; i++)
-            sampleNext1D(sg);
+        /*for (uint i = 0; i < gPRNGDimension; i++)
+            sampleNext1D(sg);*/ // Commenting out bc im pretty sure this loop doesnt run since I don't use available dimensions on this render pass
 
         // Compute ray origin for new rays spawned from the G-buffer.
         float3 rayOrigin = sd.computeRayOrigin();
@@ -815,7 +822,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         gDI_BGBuffer[bufferInd] = direct_illum; // add DI to f * W_X, since its Le + (integral)f, and f * W_X estimates the integral
 
         // Prepare ray payload.
-        ScatterRayData rayData = ScatterRayData(sg);
+        ScatterRayData rayData = ScatterRayData(sg, sgScatterRays);
 
         // Initialize data carriers and information needed for shift mappings
         Sample curBSDFSample = {};
@@ -845,7 +852,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         if (!generateScatterRay(sd, mi, false, rayOrigin, rayData))
             rayData.path.terminate();
 
-        float3 pre_rc_thp = float3(0);
+        float3 pre_rc_thp = float3(0); //this is thp up to and including x_k
         // Follow path into the scene and compute its total contribution.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
         for (uint depth = 0; depth <= kMaxBounces && !rayData.path.isTerminated(); depth++)
@@ -873,12 +880,11 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
                         if (shiftContext.rcVertexInd == 0) { // k = d case
                             // if we have not yet selected a rc vertex, we force reconnection to the light vertex.
-                            r.X.k = rayData.path.getVertexIndex() + 1;
+                            r.X.k = curNEESample.path.getVertexIndex();
                             // TODO / CAUTION: figure out a better way to handle this, pass info needed to re-eval the light into resampling shader.
                             //for now we'll just have paths that couldn't find a good RC vertex before their nee vertex be unshiftable.
                             r.X.rcVertex.prevSampledLobeType = (uint)LobeType::All; // and do this to flag that this is a case where we didn't find a good rc vert until litr the last one
                             r.X.rcVertex.sampledLobeType = (uint)LobeType::All;
-                            r.X.path.incrementVertexIndex(); //vertex index was d-1 when we created this sample
                             r.X.J = rayData.sampleData.nee_pdf * rayData.sampleData.nee_g; // this is handled the way the restir enhanced paper says to. p of x_(k-1) to k is just pdf of choosing x_k light vertex, we don't include p of x_k to x_(k+1) bc x_(k+1) doesn't exist
                         } else {
                             r.X.k = shiftContext.rcVertexInd;
@@ -914,7 +920,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 if (!rayData.path.isTerminated()) {
                     // if kmaxbounces was 0 or we hit env map or scatter ray failed, would terminate here and we clear rc vertex since it'd be length 2 BSDF path
                     // otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path. only case not covered would be an NEE length 2 path
-                    // if gen scatter ray succeeded, rayData.direction is dir from x2 to x3
+                    // if gen scatter ray succeeded, rayData.direction is dir from xk to x(k+1)
                     rcVertex = RCVertex(rayData.direction, rayData.pdf, { 0.f, 0.f, 0.f }, rayData.sampleData.rcPackedHitInfo,
                         rayData.sampleData.prevSampledLobeType, rayData.sampleData.sampledLobeType);
                 }
@@ -947,7 +953,15 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 debugPath.vertices[depth + 1] = rayData.origin;
             }
         }
+        r.X.seed = sgScatterRaysState;
 
+        // Set info that might be needed by random replay later
+        gReconnectionDataBuffer[bufferInd].k = shiftContext.rcVertexInd;
+        gReconnectionDataBuffer[bufferInd].seed = sgScatterRaysState;
+        sgScatterRays = SampleGenerator(pixel, (gFrameCount > 0 ? (gFrameCount - 1) : 0) * 4 + 1); //we reconstruct sg from last frame, after we no longer need this sg
+        gReconnectionDataBuffer[bufferInd].temporalSeed = sgScatterRays.rng.state;
+
+        rayData.d.preRcThp = pre_rc_thp; //DEBUGGING FOR THE RANDOM REPLAY
         debugBuffer[bufferInd] = rayData.d;
     }
     else
@@ -1129,9 +1143,10 @@ void rayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 frameDim = DispatchRaysDimensions().xy;
 
-    Reservoir r = tracePath(pixel, frameDim);
-
     uint pixelInd = pixel.y * frameDim.x + pixel.x;
+    gReconnectionDataBuffer[pixelInd] = {}; //clear it before it gets set in tracePath
+
+    Reservoir r = tracePath(pixel, frameDim);
     gReservoirBuffer[pixelInd] = r;
 
     #if IS_LAST_PASS
