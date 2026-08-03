@@ -38,5 +38,6 @@ StructuredBuffer<Reservoir> reservoir;
 StructuredBuffer<float3> color;
 StructuredBuffer<int2> spatialOffset;
 StructuredBuffer<ReconnectionData> rcData;
+StructuredBuffer<PathViewerPath> pathViewerPath;
 
 void main() {}

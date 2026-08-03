@@ -156,7 +156,8 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     // PATH VIEWER DEBUG COMPUTE PASS
     if (mUsePathViewer)
     {
-        PathViewerPass(pRenderContext, renderData);
+        bool viewReplayPaths = mShiftMappingType == ShiftMappingType::Hybrid;
+        PathViewerPass(pRenderContext, renderData, viewReplayPaths);
 
         return;
     }
@@ -249,6 +250,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mpReservoirBuffers[mOutputReservoirID]->setName("Restir Candidate Output Buffer");
     var["gDI_BGBuffer"] = mpDiBgBuffer;
     var["gReconnectionDataBuffer"] = mpReconnectionDataBuffer;
+    var["gPathDebugBuffer"] = mpPathDataBuffer;
 
     uint elementCount = targetDim.x * targetDim.y;
     if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
@@ -256,12 +258,6 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         mpCandidateGenDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
         mpCandidateGenDebugBuffer->setName("Restir Candidate Debug Buffer");
         var["debugBuffer"] = mpCandidateGenDebugBuffer;
-    }
-    if (!mpPathDataBuffer || mpPathDataBuffer->getElementCount() < elementCount)
-    {
-        mpPathDataBuffer = mpDevice->createStructuredBuffer(var["gPathDebugBuffer"], elementCount);
-        mpPathDataBuffer->setName("Restir Debug Path Data Buffer");
-        var["gPathDebugBuffer"] = mpPathDataBuffer;
     }
 
     // Spawn the rays.
@@ -346,6 +342,7 @@ void RestirPTPass::PathRetracePass(RenderContext* pRenderContext, const RenderDa
     var["viewW"] = renderData.getTexture(kInputViewDir);
     var["outputColor"] = renderData.getTexture(kOutputColor);
     var["gReconnectionData"] = mpReconnectionDataBuffer;
+    var["replayedPathBuffer"] = mpReplayedPathDataBuffer; //fill w replayed vertices for the path viewer
 
     mpScene->raytrace(pRenderContext, mReplayTracer.pProgram.get(), pVars, uint3(targetDim, 1));
 }
@@ -428,7 +425,7 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     pPass->execute(pRenderContext, targetDim.x, targetDim.y);
 }
 
-void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData)
+void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData, bool alsoViewReplayPaths = false)
 {
     if (!mpPathViewerPass) // create the compute pass for path viewer if it doesn't exist yet
     {
@@ -466,6 +463,17 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
     }
 
     mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
+
+    if (alsoViewReplayPaths)
+    {
+        if (!mpReplayedPathDataBuffer)
+        {
+            std::cout << "Path Viewer: failed, replay path data buffer not created" << std::endl;
+            return;
+        }
+        var["gPathDataBuffer"] = mpReplayedPathDataBuffer;
+        mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
+    }
 }
 
 void RestirPTPass::renderUI(Gui::Widgets& widget) {
@@ -851,6 +859,18 @@ void RestirPTPass::prepareResources(RenderContext* pRenderContext, const RenderD
 {
     uint elementCount = targetDim.x * targetDim.y;
     auto var = mpReflectTypes->getRootVar();
+
+    if (!mpPathDataBuffer || mpPathDataBuffer->getElementCount() < elementCount)
+    {
+        mpPathDataBuffer = mpDevice->createStructuredBuffer(var["pathViewerPath"], elementCount);
+        mpPathDataBuffer->setName("Restir Debug Path Data Buffer");
+    }
+    if (mShiftMappingType == ShiftMappingType::Hybrid &&
+        (!mpReplayedPathDataBuffer || mpReplayedPathDataBuffer->getElementCount() < elementCount))
+    {
+        mpReplayedPathDataBuffer = mpDevice->createStructuredBuffer(var["pathViewerPath"], elementCount);
+        mpReplayedPathDataBuffer->setName("Restir Debug Path Data Buffer - Replayed");
+    }
 
     ref<Buffer> pBuffer;
     for (int i = 0; i < 3; i++)

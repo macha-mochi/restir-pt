@@ -137,9 +137,14 @@ ReconnectionData tracePath(const uint2 pixel, const uint2 frameDim, uint seed)
     const float3 primaryRayDir = -viewW[pixel].xyz;
 
     ReconnectionData rd = gReconnectionData[pixelInd];
+    PathViewerPath path = {};
 
     uint stopVertex = gReconnectionData[pixelInd].k;
-    const HitInfo hit = HitInfo(vBuffer[pixel]);
+    uint2 offsetPixel = pixel + uint2(10, 10);
+    if (any(offsetPixel > frameDim)) {
+        offsetPixel = pixel;
+    }
+    const HitInfo hit = HitInfo(vBuffer[offsetPixel]);
     if (hit.isValid() && stopVertex > 2)
     {
         SampleGenerator sg = SampleGenerator(0);
@@ -156,6 +161,9 @@ ReconnectionData tracePath(const uint2 pixel, const uint2 frameDim, uint seed)
         // Generate scatter ray.
         if (!generateScatterRay(sd, mi, rayOrigin, rayData))
             rayData.terminated = true;
+        path.numNonCameraVertices = 1;
+        path.vertices[0] = rayData.origin;
+        path.rcIndex = stopVertex;
 
         // Follow path into the scene and compute its total contribution, up to the RC vertex.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
@@ -168,6 +176,9 @@ ReconnectionData tracePath(const uint2 pixel, const uint2 frameDim, uint seed)
             if(rayData.terminated){
                 // ray missed before it hit the kth vertex, so invalidate the thp
                 rayData.thp = float3(0.f);
+            } else {
+                path.numNonCameraVertices++;
+                path.vertices[vertex - 1] = rayData.origin;
             }
         }
 
@@ -178,6 +189,8 @@ ReconnectionData tracePath(const uint2 pixel, const uint2 frameDim, uint seed)
         // Missed primary hit or stopVertex <= 2 in which case we dont need replayedThp
         rd.replayedThp = float3(1.f);
     }
+
+    replayedPathBuffer[pixelInd] = path;
 
     return rd;
 }
@@ -274,8 +287,6 @@ void rayGenSpatial()
 
     ReconnectionData rd = tracePath(pixel, frameDim, gReconnectionData[pixelInd].seed);
     gReconnectionData[pixelInd] = rd;
-
-    //outputColor[pixel] = float4(1, 0, 0, 1);
 }
 
 /*

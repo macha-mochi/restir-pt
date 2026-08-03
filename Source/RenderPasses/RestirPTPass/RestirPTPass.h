@@ -68,7 +68,7 @@ private:
     void resetLighting();
     bool prepareLighting(RenderContext* pRenderContext);
     void prepareResources(RenderContext* pRenderContext, const RenderData& renderData);
-    void PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData);
+    void PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData, bool alsoViewReplayPaths);
     void PathRetracePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
     void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
 
@@ -145,6 +145,7 @@ private:
     bool mUsePathViewer = false; // if true, the renderer is paused so you can click around pixels on that frame
     uint2 mMousePixelPos;
     ref<Buffer> mpPathDataBuffer;
+    ref<Buffer> mpReplayedPathDataBuffer;
     ref<ComputePass> mpPathViewerPass;
     ref<Buffer> mpPathViewerDebugBuffer;
 };
