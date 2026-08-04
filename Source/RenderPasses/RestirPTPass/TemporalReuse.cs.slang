@@ -41,10 +41,6 @@ struct DebugData
     }
 };
 
-static const bool kPerformSpatialReuse = USE_SPATIAL;
-static const uint kNumSpatialNeighbors = NUM_SPATIAL_NEIGHBORS;
-static const uint kSpatialNeighborRadius = 20;
-static const bool kPerformTemporalReuse = USE_TEMPORAL;
 static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
 
 cbuffer CB
