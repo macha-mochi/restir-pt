@@ -16,17 +16,17 @@ cbuffer CB
 
 // Inputs
 Texture2D<PackedHitInfo> vBuffer;
-Texture2D<float4> viewW; // Optional
+Texture2D<float4> viewW;
+StructuredBuffer<RandomReplayInput> inputBuffer;
 
 // Outputs
-RWStructuredBuffer<ReconnectionData> gReconnectionData;
+RWStructuredBuffer<int2> spatialOffsetBuffer;
+RWStructuredBuffer<RandomReplayOutput> outputBuffer;
 RWStructuredBuffer<PathViewerPath> replayedPathBuffer;
 RWTexture2D<float4> outputColor;
 
 static const bool kUseImportanceSampling = USE_IMPORTANCE_SAMPLING;
 static const float kRayTMax = FLT_MAX;
-static const bool kPerformTemporalReuse = USE_TEMPORAL;
-static const bool kPerformSpatialReuse = USE_SPATIAL;
 static const uint kNumSpatialNeighbors = NUM_SPATIAL_NEIGHBORS;
 
 struct ScatterRayData
@@ -126,25 +126,20 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
 
  Goal: to find replayed throughput from x1 up to but excluding x_(k-1).
 
- * @param[in] pixel Pixel to trace a path for (could be a neighbor)
+ * @param[in] pixel Pixel to start the path at, aka location of x1
  * @param[in] frameDim Dimension of the frame in pixels.
  * @param[in] seed The random seed to use
  */
-ReconnectionData tracePath(const uint2 pixel, const uint2 frameDim, uint seed)
+RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, uint seed, out PathViewerPath path)
 {
     uint pixelInd = pixel.y * frameDim.x + pixel.x;
     const float3 primaryRayOrigin = gScene.camera.getPosition();
     const float3 primaryRayDir = -viewW[pixel].xyz;
 
-    ReconnectionData rd = gReconnectionData[pixelInd];
-    PathViewerPath path = {};
+    RandomReplayOutput op = {};
 
-    uint stopVertex = gReconnectionData[pixelInd].k;
-    uint2 offsetPixel = pixel + uint2(10, 10);
-    if (any(offsetPixel > frameDim)) {
-        offsetPixel = pixel;
-    }
-    const HitInfo hit = HitInfo(vBuffer[offsetPixel]);
+    uint stopVertex = inputBuffer[pixelInd].k;
+    const HitInfo hit = HitInfo(vBuffer[pixel]);
     if (hit.isValid() && stopVertex > 2)
     {
         SampleGenerator sg = SampleGenerator(0);
@@ -167,7 +162,7 @@ ReconnectionData tracePath(const uint2 pixel, const uint2 frameDim, uint seed)
 
         // Follow path into the scene and compute its total contribution, up to the RC vertex.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
-        for (uint vertex = 2; vertex <= stopVertex && !rayData.terminated; vertex++)
+        for (uint vertex = 2; vertex < stopVertex - 1 && !rayData.terminated; vertex++)
         {
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
@@ -182,17 +177,15 @@ ReconnectionData tracePath(const uint2 pixel, const uint2 frameDim, uint seed)
             }
         }
 
-        rd.replayedThp = rayData.thp;
+        op.replayedThp = rayData.thp;
     }
     else
     {
         // Missed primary hit or stopVertex <= 2 in which case we dont need replayedThp
-        rd.replayedThp = float3(1.f);
+        op.replayedThp = float3(1.f);
     }
 
-    replayedPathBuffer[pixelInd] = path;
-
-    return rd;
+    return op;
 }
 
 //
@@ -268,25 +261,55 @@ uint ind(uint2 pixel, uint2 frameDim){
 [shader("raygeneration")]
 void rayGenTemporal()
 {
-    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 basePixel = DispatchRaysIndex().xy;
     uint2 frameDim = DispatchRaysDimensions().xy;
 
-    uint pixelInd = ind(pixel, frameDim);
+    if (any(basePixel >= frameDim)) return;
 
-    ReconnectionData rd = tracePath(pixel, frameDim, gReconnectionData[pixelInd].seed);
-    gReconnectionData[pixelInd] = rd;
+    uint basePixelInd = ind(basePixel, frameDim);
+    uint outputBufferInd = getReplayOutputIndex_T(basePixel, frameDim);
+
+    // prev thps needed:
+    // canonical -> last frame for mis (NOTE: this is just tracing in current frame's bvh with current vbuffer. is wrong for scenes w motion)
+    // last frame -> this frame for reservoir update
+
+    PathViewerPath path = {};
+    RandomReplayOutput op = tracePath(basePixel, frameDim, inputBuffer[basePixelInd].seed, path);
+    outputBuffer[outputBufferInd] = op;
+
+    path = {};
+    op = tracePath(basePixel, frameDim, inputBuffer[basePixelInd].temporalSeed, path);
+    outputBuffer[outputBufferInd+1] = op;
 }
 
 [shader("raygeneration")]
 void rayGenSpatial()
 {
-    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 basePixel = DispatchRaysIndex().xy;
     uint2 frameDim = DispatchRaysDimensions().xy;
 
-    uint pixelInd = ind(pixel, frameDim);
+    uint basePixelInd = ind(basePixel, frameDim);
+    uint outputBufferInd = getReplayOutputIndex_S(basePixel, frameDim, kNumSpatialNeighbors);
+    //^^ this will be updated as we get our spatial thps bc there are so many of them.
 
-    ReconnectionData rd = tracePath(pixel, frameDim, gReconnectionData[pixelInd].seed);
-    gReconnectionData[pixelInd] = rd;
+    // prev thps needed:
+    // canonical -> each spatial neighbor for mis
+    // for each neighbor:
+    //    neighbor -> this pixel for reservoir update
+    //    neighbor -> each neighbor that is not itself for mis
+
+    PathViewerPath path = {};
+    RandomReplayOutput op = {};
+
+    /*for(int i = 0; i < kNumSpatialNeighbors; i++)
+    {
+        path = {};
+        op = tracePath(neighborPixel, frameDim, inputBuffer[basePixelInd].seed, path);
+        outputBuffer[outputBufferInd] = op;
+        outputBufferInd++;
+    }*/
+
+
 }
 
 /*

@@ -74,7 +74,7 @@ Texture2D<float2> gMotionVectors; // Not used in this shader
 // Outputs (not an actual output channel but actually just the reservoir buffer)
 RWStructuredBuffer<Reservoir> gReservoirBuffer;
 RWStructuredBuffer<float3> gDI_BGBuffer;
-RWStructuredBuffer<ReconnectionData> gReconnectionDataBuffer; // contains data that will be used for random replay later
+RWStructuredBuffer<RandomReplayInput> gReplayInputBuffer; // contains data that will be used for random replay later
 
 RWTexture2D<float4> outputColor;
 
@@ -956,10 +956,10 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         r.X.seed = sgScatterRaysState;
 
         // Set info that might be needed by random replay later
-        gReconnectionDataBuffer[bufferInd].k = shiftContext.rcVertexInd;
-        gReconnectionDataBuffer[bufferInd].seed = sgScatterRaysState;
-        sgScatterRays = SampleGenerator(pixel, (gFrameCount > 0 ? (gFrameCount - 1) : 0) * 4 + 1); //we reconstruct sg from last frame, after we no longer need this sg
-        gReconnectionDataBuffer[bufferInd].temporalSeed = sgScatterRays.rng.state;
+        gReplayInputBuffer[bufferInd].k = shiftContext.rcVertexInd;
+        gReplayInputBuffer[bufferInd].seed = sgScatterRaysState;
+        sgScatterRays = SampleGenerator(pixel, (gFrameCount > 0 ? (gFrameCount - 1) : 0) * 4 + 1); // we reconstruct sg from last frame, after we no longer need this sg
+        gReplayInputBuffer[bufferInd].temporalSeed = sgScatterRays.rng.state;
 
         rayData.d.preRcThp = pre_rc_thp; //DEBUGGING FOR THE RANDOM REPLAY
         debugBuffer[bufferInd] = rayData.d;
@@ -1136,7 +1136,6 @@ void scatterSdfGridClosestHit(inout ScatterRayData rayData, SDFGridHitData sdfGr
 //
 // Shader entry point for ray generation shader.
 
-
 [shader("raygeneration")]
 void rayGen()
 {
@@ -1144,7 +1143,7 @@ void rayGen()
     uint2 frameDim = DispatchRaysDimensions().xy;
 
     uint pixelInd = pixel.y * frameDim.x + pixel.x;
-    gReconnectionDataBuffer[pixelInd] = {}; //clear it before it gets set in tracePath
+    gReplayInputBuffer[pixelInd] = {}; //clear it before it gets set in tracePath
 
     Reservoir r = tracePath(pixel, frameDim);
     gReservoirBuffer[pixelInd] = r;

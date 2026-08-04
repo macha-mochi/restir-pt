@@ -91,3 +91,44 @@ ShadingData loadTemporalShadingData(const HitInfo hit, const float3 rayOrigin, c
 
     return sd;
 }
+
+/**
+ Gets the index of the first of the two RandomReplayOutput structs in ReplayOutputBuffer that are needed in shifts in TemporalReuse pass.
+
+ [pixel]: the pixel whose sample is being shifted in/out of last frame, aka the one we're doing restir at
+
+ The same buffer is used for the random replay outputs for temporal and spatial.
+ This index is for indexing into the temporal scheme of organizing data which is:
+- canonical -> last frame for mis
+- last frame -> this frame for reservoir update
+*/
+uint getReplayOutputIndex_T(uint2 pixel, uint2 frameDim) {
+    return (pixel.y * frameDim.x + pixel.x) * 2;
+}
+
+/**
+ Gets the index of the first of the RandomReplayOutput structs in ReplayOutputBuffer that are needed in shifts in SpatialReuse pass.
+
+ [pixel]: the "current pixel" we are doing Restir at
+
+ The same buffer is used for the random replay outputs for temporal and spatial.
+ This index is for indexing into the spatial scheme of organizing data which is:
+    // canonical -> each spatial neighbor for mis
+    // for each neighbor:
+    //    neighbor -> this pixel for reservoir update
+    //    neighbor -> each neighbor that is not itself for mis
+
+  Example with 3 spatial neighbors:
+  | canon -> 0 | canon -> 1 | canon -> 2 || 0 -> canon | 0 -> 1 | 0 -> 2 || 1 -> canon | 1 -> 0 | 1 -> 2 || 2 -> canon | 2 -> 0 | 2 -> 1
+  This will return the index of |canon->0| and the user is expected to add offsets for the rest.
+*/
+uint getReplayOutputIndex_S(uint2 pixel, uint2 frameDim, uint numNeighbors) {
+    return (pixel.y * frameDim.x + pixel.x) * (numNeighbors * (numNeighbors + 1));
+}
+
+// Returns the index of the [neighborInd]th offset of [pixel], given frameDim and neighbors per pixel
+// FOr exmaple, if i wanted the spatial offset of pixel (x, y) in the first spatial pass, parameters are (x, y) and 0
+// This is 0 indexed!!
+uint getSpatialOffsetBufferIndex(uint2 pixel, uint2 frameDim, uint neighborsPerPixel, uint neighborInd) {
+    return (pixel.y * frameDim.x + pixel.x) * neighborsPerPixel + neighborInd;
+}

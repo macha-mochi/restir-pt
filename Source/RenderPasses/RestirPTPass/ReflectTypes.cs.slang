@@ -37,7 +37,8 @@ import RestirReservoir;
 StructuredBuffer<Reservoir> reservoir;
 StructuredBuffer<float3> color;
 StructuredBuffer<int2> spatialOffset;
-StructuredBuffer<ReconnectionData> rcData;
+StructuredBuffer<RandomReplayInput> randomReplayInput;
+StructuredBuffer<RandomReplayOutput> randomReplayOutput;
 StructuredBuffer<PathViewerPath> pathViewerPath;
 
 void main() {}

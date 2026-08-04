@@ -14,10 +14,7 @@ struct DebugData
     }
 };
 
-static const bool kPerformSpatialReuse = USE_SPATIAL;
 static const uint kNumSpatialNeighbors = NUM_SPATIAL_NEIGHBORS;
-static const uint kSpatialNeighborRadius = 20;
-static const bool kPerformTemporalReuse = USE_TEMPORAL;
 static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
 
 cbuffer CB
@@ -36,8 +33,8 @@ struct SpatialReusePass {
     StructuredBuffer<Reservoir> inputBuffer;
     StructuredBuffer<Reservoir> temporalBuffer;
     StructuredBuffer<float3> di_bgBuffer;
+    StructuredBuffer<int2> spatialOffsetBuffer; // stores the offsets from a pixel, which could take on negative values
     // Outputs
-    RWStructuredBuffer<int2> spatialOffsetBuffer; //stores the offsets from a pixel, which could take on negative values
     RWStructuredBuffer<Reservoir> outputBuffer;
     RWTexture2D<float4> outputColor;
 
@@ -48,14 +45,10 @@ struct SpatialReusePass {
         return pixel.y * gOutputDimensions.x + pixel.x;
     }
 
-    int2 createSpatialOffset(uint radius, inout SampleGenerator sg) {
-        return (int2)(radius * sample_disk(sampleNext2D(sg)));
-    }
-
     // Returns the index of the [neighborInd]th offset of [pixel]. FOr exmaple, if i wanted the spatial offset of pixel (x, y) in the first spatial pass, parameters are (x, y) and 0
     // This is 0 indexed!!
     uint getOffsetBufferIndex(uint2 pixel, uint neighborInd) {
-        return ind(pixel) * kNumSpatialNeighbors + neighborInd;
+        return getSpatialOffsetBufferIndex(pixel, gOutputDimensions, kNumSpatialNeighbors, neighborInd);
     }
 
     // Returns the pixel coordinates of the [neighborInd]th neighbor of [pixel] in [neighbor]. 1st spatial pass = 0th neighbor. Returns false if it was oob
@@ -66,13 +59,6 @@ struct SpatialReusePass {
             return false;
         }
         return true;
-    }
-
-    void generateSpatialOffsets(uint2 pixel, inout SampleGenerator sg) {
-        for (int i = 0; i < kNumSpatialNeighbors; i++) {
-            uint idx = getOffsetBufferIndex(pixel, i);
-            spatialOffsetBuffer[idx] = createSpatialOffset(kSpatialNeighborRadius, sg);
-        }
     }
 
     void execute(uint2 pixel) {
@@ -87,8 +73,6 @@ struct SpatialReusePass {
             sampleNext1D(sg);
 
         DebugData debugData = {};
-
-        generateSpatialOffsets(pixel, sg);
 
         // Treat input buffer sample as canonical.
         float m_num = inputBuffer[ind(pixel)].c * luminance(inputBuffer[ind(pixel)].X.p_hat); // alr in the correct domain

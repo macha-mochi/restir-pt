@@ -71,6 +71,7 @@ private:
     void PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData, bool alsoViewReplayPaths);
     void PathRetracePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
     void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
+    void GenSpatialOffsetsPass(RenderContext* pRenderContext, const RenderData& renderData);
 
     // Internal state
 
@@ -90,11 +91,13 @@ private:
     /// Type of shift mapping used
     ShiftMappingType mShiftMappingType = ShiftMappingType::Hybrid;
     /// Whether to do spatial reuse
-    bool mUseSpatialReuse = true;
+    bool mUseSpatialReuse = false;
     /// Number of spatial neighbors per pixel
     uint mNumSpatialNeighbors = 3;
+    ///  Radius that spatial neighbors are picked from in a pixel
+    uint mSpatialNeighborRadius = 20;
     /// Whether to do temporal reuse
-    bool mUseTemporalReuse = true;
+    bool mUseTemporalReuse = false;
 
     // Runtime data
 
@@ -130,12 +133,14 @@ private:
 
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
     ref<Buffer> mpSpatialOffsetBuffer; ///< Buffer of size (elementCount * numSpatialNeighbors per pixel) storing the amount to offset a pixel by to get its neighbor
-    ref<Buffer> mpReconnectionDataBuffer; ///< Stores data needed for RC like random replayed thp (amongst other things tba)
+    ref<Buffer> mpReplayInputBuffer; ///< Stores data needed for RC like seed
+    ref<Buffer> mpReplayOutputBuffer; ///< Stores results of replay pass
 
     //Compute passes
     ref<ComputePass> mpReflectTypes; /// Dummy compute pass for preparing resources of the right type
-    ref<ComputePass> mpSpatialReusePass; /// Spatial resampling.
     ref<ComputePass> mpTemporalReusePass; /// Temporal resampling.
+    ref<ComputePass> mpGenSpatialOffsetsPass; /// Generates spatial offsets. Maybe impl reuse textures in future?
+    ref<ComputePass> mpSpatialReusePass; /// Spatial resampling.
 
     //Debugging resources
     ref<Buffer> mpCandidateGenDebugBuffer;
@@ -145,7 +150,7 @@ private:
     bool mUsePathViewer = false; // if true, the renderer is paused so you can click around pixels on that frame
     uint2 mMousePixelPos;
     ref<Buffer> mpPathDataBuffer;
-    ref<Buffer> mpReplayedPathDataBuffer;
+    ref<Buffer> mpReplayPathDataBuffer;
     ref<ComputePass> mpPathViewerPass;
     ref<Buffer> mpPathViewerDebugBuffer;
 };

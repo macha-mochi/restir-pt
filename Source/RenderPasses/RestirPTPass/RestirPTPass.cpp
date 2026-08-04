@@ -39,6 +39,7 @@ namespace
 {
 const char kReflectTypesShaderFile[] = "RenderPasses/RestirPTPass/ReflectTypes.cs.slang";
 const char kCandidateGenShaderFile[] = "RenderPasses/RestirPTPass/RestirGenCandidates.rt.slang";
+const char kGenSpatialOffsetShaderFile[] = "RenderPasses/RestirPTPass/GenerateSpatialNeighbors.cs.slang";
 const char kSpatialComputeShaderFile[] = "RenderPasses/RestirPTPass/SpatialReuse.cs.slang";
 const char kTemporalComputeShaderFile[] = "RenderPasses/RestirPTPass/TemporalReuse.cs.slang";
 const char kRetracePathsShaderFile[] = "RenderPasses/RestirPTPass/RetracePaths.rt.slang";
@@ -249,7 +250,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];
     mpReservoirBuffers[mOutputReservoirID]->setName("Restir Candidate Output Buffer");
     var["gDI_BGBuffer"] = mpDiBgBuffer;
-    var["gReconnectionDataBuffer"] = mpReconnectionDataBuffer;
+    var["gReplayInputBuffer"] = mpReplayInputBuffer;
     var["gPathDebugBuffer"] = mpPathDataBuffer;
 
     uint elementCount = targetDim.x * targetDim.y;
@@ -281,6 +282,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     }
     if (mUseSpatialReuse)
     {
+        GenSpatialOffsetsPass(pRenderContext, renderData);
         // RANDOM REPLAY PATH RETRACE (hybrid only)
         if (mShiftMappingType == ShiftMappingType::Hybrid)
         {
@@ -300,12 +302,35 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mFrameCount++;
 }
 
+void RestirPTPass::GenSpatialOffsetsPass(RenderContext* pRenderContext, const RenderData& renderData) {
+    if (!mpGenSpatialOffsetsPass) // create the compute pass if it doesn't exist yet
+    {
+        DefineList defines;
+        defines.add(mpSampleGenerator->getDefines());
+        defines.add("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
+        defines.add("SPATIAL_NEIGHBOR_RADIUS", std::to_string(mSpatialNeighborRadius));
+
+        ProgramDesc desc;
+        desc.addShaderLibrary(kGenSpatialOffsetShaderFile);
+        desc.csEntry("main");
+        mpGenSpatialOffsetsPass = ComputePass::create(mpDevice, desc, defines);
+    }
+
+    //Defines
+    auto program = mpGenSpatialOffsetsPass->getProgram();
+    program->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
+    program->addDefine("SPATIAL_NEIGHBOR_RADIUS", std::to_string(mSpatialNeighborRadius));
+
+    auto var = mpGenSpatialOffsetsPass->getRootVar();
+    var["spatialOffsetBuffer"] = mpSpatialOffsetBuffer;
+
+    mpGenSpatialOffsetsPass->execute(pRenderContext, targetDim.x, targetDim.y);
+}
+
 // Adds defines, prepares vars, binds resources and executes for path retrace passes
 void RestirPTPass::PathRetracePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal) {
     //Defines
     mReplayTracer.pProgram->addDefine("USE_IMPORTANCE_SAMPLING", mUseImportanceSampling ? "1" : "0");
-    mReplayTracer.pProgram->addDefine("USE_SPATIAL", mUseSpatialReuse ? "1" : "0");
-    mReplayTracer.pProgram->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0");
     mReplayTracer.pProgram->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
     mReplayTracer.pProgram->addDefines(getValidResourceDefines(kInputChannels, renderData)); // you only need vbuffer and vieww
 
@@ -340,9 +365,11 @@ void RestirPTPass::PathRetracePass(RenderContext* pRenderContext, const RenderDa
     var["CB"]["gFrameCount"] = mFrameCount;
     var["vBuffer"] = renderData.getTexture(kInputVBuffer);
     var["viewW"] = renderData.getTexture(kInputViewDir);
+    var["inputBuffer"] = mpReplayInputBuffer;
+    var["outputBuffer"] = mpReplayOutputBuffer;
     var["outputColor"] = renderData.getTexture(kOutputColor);
-    var["gReconnectionData"] = mpReconnectionDataBuffer;
-    var["replayedPathBuffer"] = mpReplayedPathDataBuffer; //fill w replayed vertices for the path viewer
+    var["spatialOffsetBuffer"] = mpSpatialOffsetBuffer;
+    var["replayedPathBuffer"] = mpReplayPathDataBuffer; //fill w replayed vertices for the path viewer
 
     mpScene->raytrace(pRenderContext, mReplayTracer.pProgram.get(), pVars, uint3(targetDim, 1));
 }
@@ -355,9 +382,10 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     ref<ComputePass> pPass = isTemporal ? mpTemporalReusePass : mpSpatialReusePass;
     auto program = pPass->getProgram();
     program->addDefine("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
-    program->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
-    program->addDefine("USE_SPATIAL", mUseSpatialReuse ? "1" : "0");
-    program->addDefine("USE_TEMPORAL", mUseTemporalReuse && mFrameCount > 0 ? "1" : "0");
+    if (!isTemporal)
+    {
+        program->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
+    }
     bool lastPass = (isTemporal && !mUseSpatialReuse);
     program->addDefine("IS_LAST_PASS", lastPass ? "1" : "0");
 
@@ -435,7 +463,7 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
         desc.csEntry("drawPaths");
         mpPathViewerPass = ComputePass::create(mpDevice, desc, defines);
     }
-
+    
     if (!mpPathDataBuffer)
     {
         std::cout << "Path Viewer: failed, path data buffer not created" << std::endl;
@@ -466,12 +494,12 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
 
     if (alsoViewReplayPaths)
     {
-        if (!mpReplayedPathDataBuffer)
+        if (!mpReplayPathDataBuffer)
         {
             std::cout << "Path Viewer: failed, replay path data buffer not created" << std::endl;
             return;
         }
-        var["gPathDataBuffer"] = mpReplayedPathDataBuffer;
+        var["gPathDataBuffer"] = mpReplayPathDataBuffer;
         mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
     }
 }
@@ -544,11 +572,11 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
 {
     // Clear data for previous scene.
     // After changing scene, the raytracing program should to be recreated.
+    mFrameCount = 0;
+    resetLighting();
     mTracer.pProgram = nullptr;
     mTracer.pBindingTable = nullptr;
     mTracer.pVars = nullptr;
-    mFrameCount = 0;
-    resetLighting();
     for (int i = 0; i < 3; i++)
     {
         mpReservoirBuffers[i] = nullptr;
@@ -556,7 +584,8 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mpTemporalVBuffer = nullptr;
     mpTemporalViewDir = nullptr;
     mpDiBgBuffer = nullptr;
-    mpReconnectionDataBuffer = nullptr;
+    mpReplayInputBuffer = nullptr;
+    mpReplayOutputBuffer = nullptr;
     mReplayTracer.pProgram = nullptr;
     mReplayTracer.pBindingTableTemporal = nullptr;
     mReplayTracer.pVarsTemporal = nullptr;
@@ -565,8 +594,8 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
 
     mUsePathViewer = false;
     mpPathDataBuffer = nullptr;
+    mpReplayPathDataBuffer = nullptr;
     mMousePixelPos = uint2(0, 0);
-    
 
     //Set the scene to the new one
     mpScene = pScene;
@@ -581,7 +610,6 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         {
             logWarning("RestirPTPass: This render pass does not support curves");
         }
-
         if (mpScene->hasGeometryType(Scene::GeometryType::SDFGrid))
         {
             logWarning("RestirPTPass: This render pass does not support sdfs");
@@ -633,7 +661,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         ProgramDesc rDesc;
         rDesc.addShaderModules(mpScene->getShaderModules());
         rDesc.addShaderLibrary(kRetracePathsShaderFile);
-        rDesc.setMaxPayloadSize(48u); // this payload is pretty small, but this is loose bound
+        rDesc.setMaxPayloadSize(64u); // this payload is pretty small, but this is loose bound
         rDesc.setMaxAttributeSize(mpScene->getRaytracingMaxAttributeSize());
         rDesc.setMaxTraceRecursionDepth(kMaxRecursionDepth);
 
@@ -679,7 +707,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
 
         mReplayTracer.pProgram = Program::create(mpDevice, rDesc, mpScene->getSceneDefines());
 
-        // Create the resampling compute passes here since we needed mpScene
+        // Create compute passes here since we needed mpScene
         // Helper for creating compute passes.
         auto createComputePass = [&](const std::string& file, const std::string& entryPoint,
                                      const std::vector<std::pair<std::string, std::string>>& customDefines = {})
@@ -704,17 +732,11 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         mpSpatialReusePass = createComputePass(
             kSpatialComputeShaderFile, "main",
             {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)},
-             {"USE_SPATIAL", mUseSpatialReuse ? "1" : "0"},
-             {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
-             {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"},
-             {"IS_LAST_PASS", "0"}}
+             {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)}}
         );
         mpTemporalReusePass = createComputePass(
             kTemporalComputeShaderFile, "main",
             {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)},
-             {"USE_SPATIAL", mUseSpatialReuse ? "1" : "0"},
-             {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
-             {"USE_TEMPORAL", mUseTemporalReuse ? "1" : "0"},
              {"IS_LAST_PASS", "0"}}
         );
     }
@@ -866,10 +888,10 @@ void RestirPTPass::prepareResources(RenderContext* pRenderContext, const RenderD
         mpPathDataBuffer->setName("Restir Debug Path Data Buffer");
     }
     if (mShiftMappingType == ShiftMappingType::Hybrid &&
-        (!mpReplayedPathDataBuffer || mpReplayedPathDataBuffer->getElementCount() < elementCount))
+        (!mpReplayPathDataBuffer || mpReplayPathDataBuffer->getElementCount() < elementCount))
     {
-        mpReplayedPathDataBuffer = mpDevice->createStructuredBuffer(var["pathViewerPath"], elementCount);
-        mpReplayedPathDataBuffer->setName("Restir Debug Path Data Buffer - Replayed");
+        mpReplayPathDataBuffer = mpDevice->createStructuredBuffer(var["pathViewerPath"], elementCount);
+        mpReplayPathDataBuffer->setName("Restir Debug Path Data Buffer - Replayed");
     }
 
     ref<Buffer> pBuffer;
@@ -887,10 +909,19 @@ void RestirPTPass::prepareResources(RenderContext* pRenderContext, const RenderD
         mpDiBgBuffer = mpDevice->createStructuredBuffer(var["color"], elementCount);
         mpDiBgBuffer->setName("Restir DI_BG_Buffer");
     }
-    if (!mpReconnectionDataBuffer || mpReconnectionDataBuffer->getElementCount() < elementCount)
+    if (mShiftMappingType == ShiftMappingType::Hybrid)
     {
-        mpReconnectionDataBuffer = mpDevice->createStructuredBuffer(var["rcData"], elementCount);
-        mpReconnectionDataBuffer->setName("Restir Reconnection Data Buffer");
+        if (!mpReplayInputBuffer || mpReplayInputBuffer->getElementCount() < elementCount)
+        {
+            mpReplayInputBuffer = mpDevice->createStructuredBuffer(var["randomReplayInput"], elementCount);
+            mpReplayInputBuffer->setName("Restir Replay Input Buffer");
+        }
+        uint maxReplaysPerPixel = mNumSpatialNeighbors * (mNumSpatialNeighbors + 1);
+        if (!mpReplayOutputBuffer || mpReplayOutputBuffer->getElementCount() < maxReplaysPerPixel * elementCount)
+        {
+            mpReplayOutputBuffer = mpDevice->createStructuredBuffer(var["randomReplayOutput"], elementCount);
+            mpReplayOutputBuffer->setName("Restir Replay Output Buffer");
+        }
     }
     if (!mpSpatialOffsetBuffer || mpSpatialOffsetBuffer->getElementCount() < elementCount * mNumSpatialNeighbors)
     {
