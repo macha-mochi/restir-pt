@@ -22,13 +22,11 @@ struct RandomReplayInput
 {
     uint k;
     uint seed;
-    uint temporalSeed;
 
     #ifndef HOST_CODE
     __init(){
         k = 0;
         seed = 0;
-        temporalSeed = 0;
     }
     #endif
 };
@@ -38,13 +36,17 @@ Struct to store output of the random replay path
 */
 struct RandomReplayOutput
 {
-    uint4 packedHitInfo;
+    uint4 x_kMinus1_hitInfo;
+    float3 x_kMinus2_pos;
     float3 replayedThp;
+    uint2 sourcePixel;
 
     #ifndef HOST_CODE
     __init(){
-        packedHitInfo = uint4(0);
+        x_kMinus1_hitInfo = uint4(0);
+        x_kMinus2_pos = float3(0.f);
         replayedThp = float3(0.f);
+        sourcePixel = uint2(0);
     }
     #endif
 };
@@ -53,10 +55,10 @@ struct RandomReplayOutput
  */
 struct RCVertex
 {
-    float3 outgoingDir; // outgoing w_o from reconnection vert x_k
-    float outgoingPdf; // pdf of sampling outgoingDir
-    float3 incomingRadiance; // L incoming at x_k, along rcOutgoingDir
-    uint4 packedHitInfo; ///< Packed hit info for reconnection vertex
+    float3 outgoingDir; // outgoing w_o from reconnection vert x_k. 0 if k = d
+    float outgoingPdf; // pdf of sampling outgoingDir. 0 if k = d
+    float3 incomingRadiance; // L incoming at x_k, along rcOutgoingDir. 0 if k = d
+    uint4 packedHitInfo; ///< Packed hit info for reconnection vertex. This could be 0 if k = d for BSDF or NEE samples``
     uint prevSampledLobeType; //will be a LobeType uint, representing which lobe type got sampled for vert x_(k-1)
     uint sampledLobeType; //LobeType uint, representing lobe type sampled for vert x_k
 
@@ -110,14 +112,14 @@ struct PathViewerPath
 {
     uint numNonCameraVertices; // the same as the index of the last vertex on this path
     uint rcIndex; // ex for reconnection shift this will be 2
-    float3 vertices[5]; // starts at x1, then x2, x3, etc since camera pos is determined. these are the ray origins NOT sd.posW
+    float3 vertices[7]; // starts at x1, then x2, x3, etc since camera pos is determined. these are the ray origins NOT sd.posW
 
     #ifndef HOST_CODE
 
     __init(){
         numNonCameraVertices = 1;
         rcIndex = 0;
-        for(int i = 0; i < 5; i++){
+        for(int i = 0; i < 7; i++){
             vertices[i] = float3(0.f);
         }
     }
@@ -125,7 +127,7 @@ struct PathViewerPath
     __init(uint numVerts, uint rci){
         numNonCameraVertices = numVerts;
         rcIndex = rci;
-        for(int i = 0; i < 5; i++){
+        for(int i = 0; i < 7; i++){
             vertices[i] = float3(0.f);
         }
     }

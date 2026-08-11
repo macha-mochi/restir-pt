@@ -97,7 +97,7 @@ private:
     ///  Radius that spatial neighbors are picked from in a pixel
     uint mSpatialNeighborRadius = 20;
     /// Whether to do temporal reuse
-    bool mUseTemporalReuse = false;
+    bool mUseTemporalReuse = true;
 
     // Runtime data
 
@@ -133,7 +133,9 @@ private:
 
     ref<Buffer> mpDiBgBuffer; ///< Buffer storing direct illumination samples (or env map samples if camera ray missed) for each pixel
     ref<Buffer> mpSpatialOffsetBuffer; ///< Buffer of size (elementCount * numSpatialNeighbors per pixel) storing the amount to offset a pixel by to get its neighbor
-    ref<Buffer> mpReplayInputBuffer; ///< Stores data needed for RC like seed
+    ref<Buffer> mpReplayInputBuffers[2]; ///< Stores data needed for RC like seed
+    uint mReplayInputID;
+    uint mTemporalReplayInputID;
     ref<Buffer> mpReplayOutputBuffer; ///< Stores results of replay pass
 
     //Compute passes

@@ -5,9 +5,9 @@ import Scene.Camera.CameraData;
 
 // Inputs
 StructuredBuffer<PathViewerPath> gPathDataBuffer;
+uniform uint gIsReplay;
 uniform uint2 gMousePixelPos;
 uniform float4x4 gViewProjMatNoJitter;
-uniform float3 testPoint;
 // Outputs
 RWTexture2D<float4> gOutputColor;
 
@@ -65,6 +65,7 @@ void drawPaths(uint3 threadID: SV_DispatchThreadID) {
     uint mouseBufferInd = gMousePixelPos.y * dims.x + gMousePixelPos.x;
     uint pixelInd = pixel.y * dims.x + pixel.x;
 
+    float4 pathColor = float4(1, 1, 1, 1);
     DebugData d = {};
     for (int i = 0; i < gPathDataBuffer[mouseBufferInd].numNonCameraVertices - 1; i++) {
         uint2 p0 = worldToScreen(gPathDataBuffer[mouseBufferInd].vertices[i], dims);
@@ -75,10 +76,12 @@ void drawPaths(uint3 threadID: SV_DispatchThreadID) {
         {
             if (i + 1 < gPathDataBuffer[mouseBufferInd].rcIndex) //pre reconnection
             {
-                gOutputColor[pixel] = float4(1, 0, 0, 1);
+                pathColor = gIsReplay == 1 ? float4(0, 0, 1, 1) : float4(1, 0, 0, 1);
+                gOutputColor[pixel] = pathColor;
             } else // post reconnection
             {
-                gOutputColor[pixel] = float4(0, 1, 0, 1);
+                pathColor = gIsReplay == 1 ? float4(0, 1, 1, 1) : float4(0, 1, 0, 1);
+                gOutputColor[pixel] = pathColor;
             }
         }
     }

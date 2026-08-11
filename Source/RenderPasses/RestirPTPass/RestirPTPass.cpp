@@ -49,6 +49,7 @@ const char kPathViewerShaderFile[] = "RenderPasses/RestirPTPass/PathViewer.cs.sl
 // Ray tracing settings that affect the traversal stack size.
 // These should be set as small as possible.
 const uint32_t kMaxPayloadSizeBytes = 350u;
+const uint32_t kMaxRetracePayloadSize = 128u;
 const uint32_t kMaxRecursionDepth = 2u;
 
 const std::string kInputVBuffer = "vbuffer";
@@ -87,6 +88,9 @@ RestirPTPass::RestirPTPass(ref<Device> pDevice, const Properties& props) : Rende
     mOutputReservoirID = 0;
     mInputReservoirID = 1;
     mTemporalReservoirID = 2;
+
+    mReplayInputID = 0;
+    mTemporalReplayInputID = 1;
 }
 
 void RestirPTPass::parseProperties(const Properties& props)
@@ -250,8 +254,8 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];
     mpReservoirBuffers[mOutputReservoirID]->setName("Restir Candidate Output Buffer");
     var["gDI_BGBuffer"] = mpDiBgBuffer;
-    var["gReplayInputBuffer"] = mpReplayInputBuffer;
-    var["gPathDebugBuffer"] = mpPathDataBuffer;
+    var["gReplayInputBuffer"] = mpReplayInputBuffers[mReplayInputID]; //this will be written to in this pass, and read from in replay
+    var["gPathViewerPathBuffer"] = mpPathDataBuffer;
 
     uint elementCount = targetDim.x * targetDim.y;
     if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
@@ -265,8 +269,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
     
     //Update reseroir IDs for upcoming reuse
-    mInputReservoirID = mOutputReservoirID;
-    mOutputReservoirID = 1 - mOutputReservoirID;
+    std::swap(mInputReservoirID, mOutputReservoirID);
 
     //SPATIOTEMPORAL RESAMPLING
     if (mUseTemporalReuse && mFrameCount > 0) //no temporal history yet on frame 0
@@ -276,9 +279,9 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         {
             PathRetracePass(pRenderContext, renderData, true);
         }
+    
         PathReusePass(pRenderContext, renderData, true);
-        mInputReservoirID = mOutputReservoirID;
-        mOutputReservoirID = 1 - mOutputReservoirID;
+        std::swap(mInputReservoirID, mOutputReservoirID);
     }
     if (mUseSpatialReuse)
     {
@@ -289,15 +292,16 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
             PathRetracePass(pRenderContext, renderData, false);
         }
         PathReusePass(pRenderContext, renderData, false);
-        mInputReservoirID = mOutputReservoirID;
-        mOutputReservoirID = 1 - mOutputReservoirID;
+        std::swap(mInputReservoirID, mOutputReservoirID);
     }
 
     //Update data for next frame
     pRenderContext->copyResource(mpTemporalVBuffer.get(), renderData.getTexture(kInputVBuffer).get());
     pRenderContext->copyResource(mpTemporalViewDir.get(), renderData.getTexture(kInputViewDir).get());
     //the buffer that input reservoir id points to was actually the one that just got output written to it it just got switched in prep for next round
-    pRenderContext->copyResource(mpReservoirBuffers[mTemporalReservoirID].get(), mpReservoirBuffers[mInputReservoirID].get()); //TODO potentially wasteful, mb make a function to swap the reservoir ids or smth instead
+    
+    std::swap(mInputReservoirID, mTemporalReservoirID);
+    std::swap(mReplayInputID, mTemporalReplayInputID);
 
     mFrameCount++;
 }
@@ -365,7 +369,13 @@ void RestirPTPass::PathRetracePass(RenderContext* pRenderContext, const RenderDa
     var["CB"]["gFrameCount"] = mFrameCount;
     var["vBuffer"] = renderData.getTexture(kInputVBuffer);
     var["viewW"] = renderData.getTexture(kInputViewDir);
-    var["inputBuffer"] = mpReplayInputBuffer;
+    var["inputBuffer"] = mpReplayInputBuffers[mReplayInputID];
+    mpReplayInputBuffers[mReplayInputID]->setName("Restir Replay Input Buffer");
+    if (isTemporal)
+    {
+        var["temporalInputBuffer"] = mpReplayInputBuffers[mTemporalReplayInputID];
+        mpReplayInputBuffers[mTemporalReplayInputID]->setName("Restir Replay Input Buffer - Temporal");
+    }
     var["outputBuffer"] = mpReplayOutputBuffer;
     var["outputColor"] = renderData.getTexture(kOutputColor);
     var["spatialOffsetBuffer"] = mpSpatialOffsetBuffer;
@@ -427,6 +437,10 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     passVar["temporalBuffer"] = mpReservoirBuffers[mTemporalReservoirID];
     mpReservoirBuffers[mTemporalReservoirID]->setName("Restir Resampled Temporal Buffer");
     passVar["di_bgBuffer"] = mpDiBgBuffer;
+    if (mShiftMappingType == ShiftMappingType::Hybrid)
+    {
+        passVar["replayedDataBuffer"] = mpReplayOutputBuffer;
+    }
 
     uint elementCount = targetDim.x * targetDim.y;
     if (isTemporal)
@@ -477,6 +491,7 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
     }
 
     auto var = mpPathViewerPass->getRootVar();
+    var["gIsReplay"] = 0;
     var["gPathDataBuffer"] = mpPathDataBuffer;
     var["gMousePixelPos"] = mMousePixelPos;
     var["gOutputColor"] = renderData.getTexture(kOutputColor);
@@ -499,6 +514,8 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
             std::cout << "Path Viewer: failed, replay path data buffer not created" << std::endl;
             return;
         }
+        std::cout << "view replay" << std::endl;
+        var["gIsReplay"] = 1;
         var["gPathDataBuffer"] = mpReplayPathDataBuffer;
         mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
     }
@@ -584,7 +601,10 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
     mpTemporalVBuffer = nullptr;
     mpTemporalViewDir = nullptr;
     mpDiBgBuffer = nullptr;
-    mpReplayInputBuffer = nullptr;
+    for (int i = 0; i < 2; i++)
+    {
+       mpReplayInputBuffers[i] = nullptr;
+    }
     mpReplayOutputBuffer = nullptr;
     mReplayTracer.pProgram = nullptr;
     mReplayTracer.pBindingTableTemporal = nullptr;
@@ -661,7 +681,7 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         ProgramDesc rDesc;
         rDesc.addShaderModules(mpScene->getShaderModules());
         rDesc.addShaderLibrary(kRetracePathsShaderFile);
-        rDesc.setMaxPayloadSize(64u); // this payload is pretty small, but this is loose bound
+        rDesc.setMaxPayloadSize(kMaxRetracePayloadSize);
         rDesc.setMaxAttributeSize(mpScene->getRaytracingMaxAttributeSize());
         rDesc.setMaxTraceRecursionDepth(kMaxRecursionDepth);
 
@@ -911,15 +931,19 @@ void RestirPTPass::prepareResources(RenderContext* pRenderContext, const RenderD
     }
     if (mShiftMappingType == ShiftMappingType::Hybrid)
     {
-        if (!mpReplayInputBuffer || mpReplayInputBuffer->getElementCount() < elementCount)
+        for (int i = 0; i < 2; i++)
         {
-            mpReplayInputBuffer = mpDevice->createStructuredBuffer(var["randomReplayInput"], elementCount);
-            mpReplayInputBuffer->setName("Restir Replay Input Buffer");
+            pBuffer = mpReplayInputBuffers[i];
+            if (!pBuffer || pBuffer->getElementCount() < elementCount)
+            {
+                pBuffer = mpDevice->createStructuredBuffer(var["randomReplayInput"], elementCount);
+                mpReplayInputBuffers[i] = pBuffer;
+            }
         }
         uint maxReplaysPerPixel = mNumSpatialNeighbors * (mNumSpatialNeighbors + 1);
         if (!mpReplayOutputBuffer || mpReplayOutputBuffer->getElementCount() < maxReplaysPerPixel * elementCount)
         {
-            mpReplayOutputBuffer = mpDevice->createStructuredBuffer(var["randomReplayOutput"], elementCount);
+            mpReplayOutputBuffer = mpDevice->createStructuredBuffer(var["randomReplayOutput"], maxReplaysPerPixel * elementCount);
             mpReplayOutputBuffer->setName("Restir Replay Output Buffer");
         }
     }

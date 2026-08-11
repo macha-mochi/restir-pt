@@ -80,7 +80,7 @@ RWTexture2D<float4> outputColor;
 
 //Debug buffers
 RWStructuredBuffer<DebugData> debugBuffer;
-RWStructuredBuffer<PathViewerPath> gPathDebugBuffer;
+RWStructuredBuffer<PathViewerPath> gPathViewerPathBuffer;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
@@ -112,13 +112,25 @@ struct DebugData {
     }
 }
 
+/**
+ShiftContext is used for things that we capture early on in the path but then stay the same, it lives in tracePath but not ray payload.
+RayData is for stuff that changes at every vertex.
+*/
 struct ShiftContext{
     uint rcVertexInd;
+    float3 thp_upToIncl_xk;
     float primaryRayFootprint; //used for hybrid only
+    float jacobian_denom; // only set once rcvertexind is set!
+    uint x_kPlus1_seed;
+    float prevRayPdf; // during the loop, if vertex = i, this holds the pdf of the ray from vertex i-1 to vertex i
 
     __init(){
         rcVertexInd = 0;
+        thp_upToIncl_xk = float3(0.f);
         primaryRayFootprint = 0.f;
+        jacobian_denom = 0.f;
+        x_kPlus1_seed = 0;
+        prevRayPdf = 0.f;
     }
 }
 
@@ -128,18 +140,18 @@ struct SampleData{
     float3 nee_p_hat;
     float nee_w_i;
     float j_denom;
+    float g; //cos / dist for x(i-1) to x_i
 
-    //RC vertex info
-    float3 Li;
-    uint4 rcPackedHitInfo;
-    uint prevSampledLobeType;
-    uint sampledLobeType;
+    // RC vertex info for nee case
     float3 nee_wo;
+    float3 nee_Li;
+    uint4 rcPackedHitInfo;
 
     // hybrid shift jacobian / rc vertex criteria info
     float nee_pdf; // needed for jacobian denom calculation
     float nee_g; // also needed for jacobian denom calc
-    float dualRayFootprint; // this is for x_k
+    float dualRayFootprint; // this is for x_k, updated every hit and set to 0 if conditions not met
+    uint neeSeed;           // State of random number generator right before we called generateNEESample
 
     __init(){
         bsdf_p_hat = {0.f, 0.f, 0.f};
@@ -147,12 +159,12 @@ struct SampleData{
         nee_p_hat = {0.f, 0.f, 0.f};
         nee_w_i = 0.f;
         j_denom = 0.f;
+        g = 0.f;
 
-        Li = { 0.f, 0.f, 0.f };
+        nee_Li = { 0.f, 0.f, 0.f };
         rcPackedHitInfo = {0, 0, 0, 0};
-        prevSampledLobeType = 0;
-        sampledLobeType = 0;
         nee_wo = { 0.f, 0.f, 0.f };
+        neeSeed = 0;
 
         nee_pdf = 0.f;
         nee_g = 0.f;
@@ -171,11 +183,14 @@ struct ScatterRayData
     float3 direction; ///< Next path segment direction.
     float3 normal;    ///< Shading normal at origin. Used for light sampling and MIS weight calculations.
     float pdf; ///< Pdf of last path segment (the one leading to the current vertex). This is needed for MIS weight calculations at the current vertex for the bsdf
-
     float roughness;  ///< Roughness at origin, used for thresholding for hybrid shift
+
     float3 p_hat_thp; // Throughput for the p_hat calculations. doesn't include pdf, only bsdf * geo term
     float path_pdf;   ///< Current path pdf (just multiplying) in terms of solid angle (changed from area)
-    SampleData sampleData;
+    uint prevSampledLobeType;
+    uint sampledLobeType;
+
+    SampleData sampleData; ///< Data that is only valid at one vertex and gets written to at each vertex
 
     SampleGenerator sg;
     SampleGenerator sgScatterRays; ///< Per-ray state for the sample generator (up to 16B).
@@ -193,13 +208,19 @@ struct ScatterRayData
 
         this.origin = float3(0, 0, 0);
         this.direction = float3(0, 0, 0);
-        this.sg = sg;
-        this.sgScatterRays = sgScatterRays;
+        this.normal = float3(0, 0, 0);
+        this.pdf = 0.f;
+        this.roughness = 0.f;
 
         this.p_hat_thp = float3(1, 1, 1);
         this.path_pdf = 1.f;
-        this.normal = float3(0, 0, 0);
+        this.prevSampledLobeType = 0;
+        this.sampledLobeType = 0;
+
         this.sampleData = {};
+
+        this.sg = sg;
+        this.sgScatterRays = sgScatterRays;
     }
 };
 
@@ -323,7 +344,7 @@ void traceScatterRay(inout ScatterRayData rayData)
  */
 bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool isCurveHit, float3 rayOrigin, inout ScatterRayData rayData)
 {
-    rayData.sampleData.prevSampledLobeType = rayData.sampleData.sampledLobeType;
+    rayData.prevSampledLobeType = rayData.sampledLobeType;
 
     // Sample material.
     BSDFSample bsdfSample;
@@ -349,11 +370,11 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
             rayData.p_hat_thp *= bsdfSample.pdf;
             rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
         }
-        rayData.sampleData.sampledLobeType = bsdfSample.lobeType;
+        rayData.sampledLobeType = bsdfSample.lobeType;
 
         return any(rayData.p_hat_thp > 0.f);
     }
-    rayData.sampleData.sampledLobeType = (uint)LobeType::None;
+    rayData.sampledLobeType = (uint)LobeType::None;
 
     return false;
 }
@@ -648,11 +669,15 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     float kMinus1_to_k_pdf = rayData.pdf;
     float3 normalAt_kMinus1 = rayData.normal;
     float kMinus1_roughness = rayData.roughness;
+    // Calculate g for jacobian calcs later
+    float3 toX_k = sd.posW - x_kMinus1;
+    float3 dirToX_k = normalize(toX_k);
+    rayData.sampleData.g = abs(dot(sd.getOrientedFaceNormal(), -dirToX_k) / dot(toX_k, toX_k));
 
     if (kShiftMappingType == (uint)ShiftMappingType::Reconnection && rayData.path.getVertexIndex() == 2){
         // jacobian is a ratio of just the geometry terms
-        float3 x1_to_x2 = sd.posW - x_kMinus1;
-        rayData.sampleData.j_denom = abs(dot(sd.getOrientedFaceNormal(), -rayData.direction)) / dot(x1_to_x2, x1_to_x2); //rayData.dir is from x1 to x2
+        // in this case, toX_k is x1_to_x2
+        rayData.sampleData.j_denom = rayData.sampleData.g; //abs(dot(sd.getOrientedFaceNormal(), -rayData.direction)) / dot(x1_to_x2, x1_to_x2);
     }
 
     // Compute ray origin for new rays spawned from the hit.
@@ -666,10 +691,9 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         return;
     }
 
+    //this code tests if the vert we are currently at could be the rc vertex. smallest possible index is 2
     if (kShiftMappingType == (uint)ShiftMappingType::Hybrid && kMinus1_roughness >= kHybridShiftRoughnessThreshold) { //single vertex roughness threshold from restir pt enhanced
-        float3 toX_k = sd.posW - x_kMinus1;
-        float3 dirToX_k = normalize(toX_k);
-        float kMinus1_k = kMinus1_to_k_pdf * abs(dot(sd.getOrientedFaceNormal(), -dirToX_k) / dot(toX_k, toX_k));
+        float kMinus1_k = kMinus1_to_k_pdf * rayData.sampleData.g;
         float k_kMinus1 = rayData.pdf * abs(dot(normalAt_kMinus1, dirToX_k) / dot(toX_k, toX_k));
         if (kMinus1_k == 0.f || k_kMinus1 == 0.f) {
             rayData.sampleData.dualRayFootprint = 0.f;
@@ -704,6 +728,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
         bool sampleLowerHemisphere = ((lobeTypes & (uint)LobeType::NonDeltaTransmission) != 0);
 
         // Sample a light.
+        rayData.sampleData.neeSeed = rayData.sg.rng.state; // store state of rng before calling generateLightSample
         validSample = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, rayData.sg, ls);
         rayData.path.setLightSampled(sampleUpperHemisphere, sampleLowerHemisphere);
         if (validSample)
@@ -737,7 +762,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                     rayData.sampleData.nee_w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf * change_in_pdf);
                     //store the following data for the main path tracing loop
                     rayData.sampleData.nee_wo = ls.dir;
-                    rayData.sampleData.Li = ls.Li * ls.pdf; // bc Li was predivided by pdf
+                    rayData.sampleData.nee_Li = ls.Li * ls.pdf; // bc Li was predivided by pdf
                     // packedHitInfo and prevSampledLobeType alr initialized, curLobeType will be initialized later
                     rayData.sampleData.nee_pdf = ls.pdf;
                     rayData.sampleData.nee_g = ls.g;
@@ -781,7 +806,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 {
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
     Reservoir r = {};
-    PathViewerPath debugPath = {};
+    PathViewerPath pathViewerPath = {};
 
     const float3 primaryRayOrigin = gScene.camera.getPosition();
     const float3 primaryRayDir = getPrimaryRayDir(pixel, frameDim, gScene.camera);
@@ -789,12 +814,8 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
     const HitInfo hit = HitInfo(gVBuffer[pixel]);
     if (hit.isValid())
     {
-        // Pixel represents a valid primary hit. Compute its contribution.
-
-        // Load shading data.
+        // Load shading data and Create material instance at shading point.
         ShadingData sd = loadShadingData(hit, primaryRayOrigin, primaryRayDir);
-
-        // Create material instance at shading point.
         let lod = ExplicitLodTextureSampler(0.f);
         let mi = gScene.materials.getMaterialInstance(sd, lod);
 
@@ -807,9 +828,6 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         // TODO: This is potentially expensive. We may want to store/restore the state from memory if it becomes a problem.
         /*for (uint i = 0; i < gPRNGDimension; i++)
             sampleNext1D(sg);*/ // Commenting out bc im pretty sure this loop doesnt run since I don't use available dimensions on this render pass
-
-        // Compute ray origin for new rays spawned from the G-buffer.
-        float3 rayOrigin = sd.computeRayOrigin();
 
         float3 direct_illum = { 0.f, 0.f, 0.f };
         if (kComputeDirect) //this code adds direct lighting, that is, emission from anything that the primary camera ray hit. TODO this is why ur version doesn't have DI!'
@@ -838,21 +856,33 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             shiftContext.rcVertexInd = 2;
         }
 
-        //Add primary hit to debug path
-        debugPath.vertices[0] = rayOrigin;
-
         // do nee for first bounce bc when that scatter ray gets traced we (might) need NEESample to represent the length 2 paths
         // this must be done before the thp changes in generateScatterRay
-        sampleNEE(sd, mi, rayData);
-        curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex, rayData.path); //rcvertex is invalid for this vert bc length 2 paths are invalid
-        curNEESample.path.setVertexIndex(2);
-        r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg);
+        if (sampleNEE(sd, mi, rayData)) {
+            RCVertex nee_x2 = { float3(0.f), 0.f, float3(0.f), uint4(0), (uint)LobeType::All, (uint)LobeType::All };
+            curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, nee_x2, rayData.path);
+            curNEESample.path.setVertexIndex(2); // sampleNEE already sets the NEE related flags of rayData, but we need to update vertex ind here
+            curNEESample.seed = sgScatterRaysState;    // this won't be used in replay, but set anyway
+            curNEESample.postRCSeed = rayData.sampleData.neeSeed; // neeSeed was set in sampleNEE (if sampleNEE returned true)
+            curNEESample.k = 2;
+            if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
+                // jacobian is ratio of cos / distance (aka g term)
+                curNEESample.J = rayData.sampleData.nee_g;
+            } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid){
+                // in k = d case, jacobian is ratio of pdf_nee (in solid angle) * g
+                curNEESample.J = rayData.sampleData.nee_pdf * rayData.sampleData.nee_g;
+            }
+            r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg);
+        }
 
+        // Compute ray origin for new rays spawned from the G-buffer.
+        float3 rayOrigin = sd.computeRayOrigin();
+        // Add primary hit to debug path
+        pathViewerPath.vertices[0] = rayOrigin;
         // Generate scatter ray.
         if (!generateScatterRay(sd, mi, false, rayOrigin, rayData))
             rayData.path.terminate();
 
-        float3 pre_rc_thp = float3(0); //this is thp up to and including x_k
         // Follow path into the scene and compute its total contribution.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
         for (uint depth = 0; depth <= kMaxBounces && !rayData.path.isTerminated(); depth++)
@@ -860,84 +890,124 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             // Process NEE samples with RIS
             if (depth != 0) { // since we alr updated reservoir with the first nee sample (light vertex = x2)
                 if (rayData.path.getVertexIndex() == shiftContext.rcVertexInd) {
-                    // Case where RC vertex is k and k+1 is a NEE light vertex needs special handling because we can't get wo or incomingRadiance from rayData fields like we can otherwise
+                    // Case where RC vertex is k and k+1 is a NEE light vertex needs special handling because we can't get wo or incomingRadiance from standard rayData fields like we can otherwise
                     RCVertex neeX_kMinus1 = rcVertex;
                     neeX_kMinus1.outgoingDir = rayData.sampleData.nee_wo;
                     neeX_kMinus1.outgoingPdf = rayData.sampleData.nee_pdf;
-                    neeX_kMinus1.incomingRadiance = rayData.sampleData.Li;
+                    neeX_kMinus1.incomingRadiance = rayData.sampleData.nee_Li;
+                    //we get prevSampledLobeType from rcVertex, which should have been populated alr since rc index has been found
                     neeX_kMinus1.sampledLobeType = (uint)LobeType::All;
                     curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, neeX_kMinus1, rayData.path);
+                    curNEESample.path .incrementVertexIndex(); // rayData.path includes data abt type of light sampled, but its vertexIndex was only incremented at the hit that spawned this nee
+                    // path seed (from beginning of path) gets set at the end
+                    curNEESample.postRCSeed = rayData.sampleData.neeSeed; // this is the seed we'd want to replay x(k+1)
                 } else {
-                    // Normal case (and k = d case, but we're just letting rcVertex be blank for that)
-                    curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex, rayData.path);
-                    curNEESample.rcVertex.incomingRadiance = curNEESample.p_hat / pre_rc_thp;
+                    if(shiftContext.rcVertexInd == 0){ //we must be in hybrid mode
+                        // k = d case
+                        RCVertex nee_kEqualsD = { float3(0.f), 0.f, float3(0.f), uint4(0), (uint)LobeType::All, (uint)LobeType::All };
+                        curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, nee_kEqualsD, rayData.path);
+                        curNEESample.path.incrementVertexIndex(); // rayData.path includes data abt type of light sampled, but its vertexIndex was only incremented at the hit that spawned this nee
+                        // path seed (from beginning of path) gets set at the end
+                        curNEESample.postRCSeed = rayData.sampleData.neeSeed; // this is the seed we'd want to replay x(k) with a diff incoming dir
+                    } else {
+                        //normal case, rcVertex has alr been set but we just need to update incomingRadiance bc you only know that after youre done tracing
+                        curNEESample = Sample(rayData.sampleData.nee_p_hat, rayData.sampleData.nee_w_i, rcVertex, rayData.path);
+                        curNEESample.rcVertex.incomingRadiance = curNEESample.p_hat / shiftContext.thp_upToIncl_xk;
+                        curNEESample.path.incrementVertexIndex(); // rayData.path includes data abt type of light sampled, but its vertexIndex was only incremented at the hit that spawned this nee
+                        // path seed (from beginning of path) gets set at the end
+                        curNEESample.postRCSeed = shiftContext.x_kPlus1_seed; //this is the seed to replay generate scatter ray originating at x_(k+1)
+                    }
                 }
-                curNEESample.path.incrementVertexIndex(); //it uses rayData.path which includes data abt type of light sampled, but its vertexIndex was only incremented at the hit that spawned this nee
+                
                 if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
                     if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
                         r.X.k = 2;
-                        r.X.J = rayData.sampleData.j_denom;
+                        r.X.J = shiftContext.jacobian_denom;
                     } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
                         if (shiftContext.rcVertexInd == 0) { // k = d case
-                            // if we have not yet selected a rc vertex, we force reconnection to the light vertex.
                             r.X.k = curNEESample.path.getVertexIndex();
-                            // TODO / CAUTION: figure out a better way to handle this, pass info needed to re-eval the light into resampling shader.
-                            //for now we'll just have paths that couldn't find a good RC vertex before their nee vertex be unshiftable.
-                            r.X.rcVertex.prevSampledLobeType = (uint)LobeType::All; // and do this to flag that this is a case where we didn't find a good rc vert until litr the last one
-                            r.X.rcVertex.sampledLobeType = (uint)LobeType::All;
                             r.X.J = rayData.sampleData.nee_pdf * rayData.sampleData.nee_g; // this is handled the way the restir enhanced paper says to. p of x_(k-1) to k is just pdf of choosing x_k light vertex, we don't include p of x_k to x_(k+1) bc x_(k+1) doesn't exist
                         } else {
                             r.X.k = shiftContext.rcVertexInd;
-                            r.X.J = rayData.sampleData.j_denom * r.X.rcVertex.outgoingPdf;
+                            r.X.J = shiftContext.jacobian_denom * r.X.rcVertex.outgoingPdf;
                             // in k = d-1 case: rcVertex.outgoingPdf is just nee_pd in solid angle for p(k to k+1). and in normal k < d case, rcVertex.outgoingPdf is the normal bsdf pdf
                         }
                     }
 
-                    debugPath.numNonCameraVertices = depth + 1; // technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
-                    debugPath.rcIndex = r.X.k;
+                    pathViewerPath.numNonCameraVertices = depth + 1; // technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
+                    pathViewerPath.rcIndex = r.X.k;
                 }
             }
-            // Clear NEE sample data in preparation for sampleNEE to be called again within handleHit (if scatter ray hits).
-            rayData.sampleData.nee_p_hat = { 0.f, 0.f, 0.f };
-            rayData.sampleData.nee_w_i = 0.f;
-            rayData.path.clearSampleTechniqueAndLightTypes(); //in prep for next vert
+            // Clear sample data in preparation for next vertex's data
+            rayData.sampleData = {};
+            rayData.path.clearSampleTechniqueAndLightTypes();
 
+            shiftContext.prevRayPdf = rayData.pdf; // also save previous ray pdf before new scatter ray generated
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             traceScatterRay(rayData);
 
-            // check if this vertex can be the rc vertex. it must not be terminated because dualRayFootprint gets set at the very end of handleHit, after we check num bounces and generateScatterRay
-            if (!rayData.path.isTerminated() && shiftContext.rcVertexInd == 0) {
-                //we have not yet selected a rc vertex, implicitly this means we are in HYBRID mode.
-                //if the ray missed, or if x(k-1) did not meet roughness threshold, dualRayFootprint is 0.f
-                if (rayData.sampleData.dualRayFootprint >= shiftContext.primaryRayFootprint) {
+            if (!rayData.path.isTerminated()) {
+                // check if this vertex can be the rc vertex. it must not be terminated because dualRayFootprint gets set at the very end of handleHit, after we check num bounces and generateScatterRay
+                if (shiftContext.rcVertexInd == 0 && rayData.sampleData.dualRayFootprint >= shiftContext.primaryRayFootprint) {
+                    // we have not yet selected a rc vertex, implicitly this means we are in HYBRID mode.
+                    // if the ray missed, or if x(k-1) did not meet roughness threshold, dualRayFootprint is 0.f
                     shiftContext.rcVertexInd = rayData.path.getVertexIndex();
+                }
+
+                //it can't be that rc vertex got set to k and we missed at k
+                if (rayData.path.getVertexIndex() == shiftContext.rcVertexInd) {
+                    shiftContext.thp_upToIncl_xk = rayData.p_hat_thp;
+                    shiftContext.jacobian_denom = rayData.sampleData.j_denom; // this "capture" of jacobian denom should work for hybrid and RC shifts, if we found valid vertex
+                    shiftContext.x_kPlus1_seed = rayData.sgScatterRays.rng.state; // the next time this random number will be used is for scatter from k+1
+
+                    // if kmaxbounces was 0 or we hit env map or scatter ray failed, path would be terminated and we wouldn't reach here
+                    // otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path
+                    // if gen scatter ray succeeded, rayData.direction is dir from xk to x(k+1)
+                    rcVertex = RCVertex(rayData.direction, rayData.pdf, { 0.f, 0.f, 0.f }, rayData.sampleData.rcPackedHitInfo,
+                    rayData.prevSampledLobeType, rayData.sampledLobeType);
                 }
             }
 
-            if (rayData.path.getVertexIndex() == shiftContext.rcVertexInd) {
-                pre_rc_thp = rayData.p_hat_thp;
-                if (!rayData.path.isTerminated()) {
-                    // if kmaxbounces was 0 or we hit env map or scatter ray failed, would terminate here and we clear rc vertex since it'd be length 2 BSDF path
-                    // otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path. only case not covered would be an NEE length 2 path
-                    // if gen scatter ray succeeded, rayData.direction is dir from xk to x(k+1)
-                    rcVertex = RCVertex(rayData.direction, rayData.pdf, { 0.f, 0.f, 0.f }, rayData.sampleData.rcPackedHitInfo,
-                        rayData.sampleData.prevSampledLobeType, rayData.sampleData.sampledLobeType);
-                }
-            }
             curBSDFSample = Sample(rayData.sampleData.bsdf_p_hat, rayData.sampleData.bsdf_w_i, rcVertex, rayData.path);
-            curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / pre_rc_thp;
+            if (shiftContext.rcVertexInd == 0) { // we havent found a rc vert yet so set k = d
+                // rc vertex outgoing dir and pdf will be 0
+                float3 xk_radiance = float3(0.f);
+                // rayData lobe types r accurate for emissive. but one off for env map
+                uint kMinus1_lobeType = rayData.prevSampledLobeType;
+                uint k_lobeType = rayData.sampledLobeType;
+                if(rayData.path.isTerminated()){
+                    xk_radiance = curBSDFSample.p_hat / rayData.p_hat_thp; //hit env map. but hit info at xk must be invalid.
+                    kMinus1_lobeType = rayData.sampledLobeType; // this info is still for x(k-1) bc handleHit wasn't called when we missed
+                    k_lobeType = (uint)LobeType::All; // following NEE conventions: if its a light source use lobetype::all
+                } //meanwhile if we didn't hit env map, incoming radiance will be 0 but the hit info will be valid
+
+                // rc vertex outgoing dir and pdf will be 0 bc k = d
+                RCVertex bsdf_kEqualsD = { float3(0),        0,         xk_radiance, rayData.sampleData.rcPackedHitInfo, kMinus1_lobeType, k_lobeType };
+                curBSDFSample.rcVertex = bsdf_kEqualsD;
+                // path seed (from beginning of path) gets set at the end
+                curBSDFSample.postRCSeed = 0; // invalid bc you can't replay if k = d
+            } else {
+                curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / shiftContext.thp_upToIncl_xk;
+                // rc vertex all set. path seed (from beginning of path) gets set at the end
+                curBSDFSample.postRCSeed = shiftContext.x_kPlus1_seed; // seed of gen scatter ray from x_(k+1)
+            }
+            
             if (r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg)) {
                 if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
                     r.X.k = 2;
-                    r.X.J = rayData.sampleData.j_denom;
+                    r.X.J = shiftContext.jacobian_denom;
                 } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
-                    if (shiftContext.rcVertexInd == 0) { // we didn't find an rc vertex yet
-                        r.X.k = rayData.path.getVertexIndex(); //k = d case! TODO need to deal w this
-                        r.X.J = rayData.pdf; //i think this might be wrong?? but we dont have a better way rn bc its the env map, which doesnst have x(k+1) or a G term
+                    if (shiftContext.rcVertexInd == 0) { // we didn't find an rc vertex
+                        r.X.k = rayData.path.getVertexIndex(); //k = d case
+                        if (rayData.path.sampledEnvMap()) {
+                            r.X.J = rayData.pdf; // might be wrong? but we dont have a better way rn bc if its the env map, that doesnst have x(k+1) or a G term
+                        } else { // but if we hit a triangle, need g term. also can't use rayData.pdf bc thats for ray coming out of xk
+                            r.X.J = shiftContext.prevRayPdf * rayData.sampleData.g;
+                        }
                     } else {
                         r.X.k = shiftContext.rcVertexInd;
-                        r.X.J = rayData.sampleData.j_denom * r.X.rcVertex.outgoingPdf; //j_denom alr calculated
+                        r.X.J = shiftContext.jacobian_denom * r.X.rcVertex.outgoingPdf; //j_denom alr calculated
                     }
                 }
 
@@ -945,23 +1015,21 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     r.X.path.setSampleType(PathFlags::bsdfSampled, PathFlags::sampledEmissive);
                 } //if we did hit the env map, path flags are alr set
 
-                debugPath.numNonCameraVertices = depth + 1;
-                debugPath.rcIndex = r.X.k;
+                pathViewerPath.numNonCameraVertices = depth + 1;
+                pathViewerPath.rcIndex = r.X.k;
             }
 
             if (!rayData.path.isTerminated()) {
-                debugPath.vertices[depth + 1] = rayData.origin;
+                pathViewerPath.vertices[depth + 1] = rayData.origin;
             }
         }
         r.X.seed = sgScatterRaysState;
 
         // Set info that might be needed by random replay later
-        gReplayInputBuffer[bufferInd].k = shiftContext.rcVertexInd;
+        gReplayInputBuffer[bufferInd].k = r.X.k;
         gReplayInputBuffer[bufferInd].seed = sgScatterRaysState;
-        sgScatterRays = SampleGenerator(pixel, (gFrameCount > 0 ? (gFrameCount - 1) : 0) * 4 + 1); // we reconstruct sg from last frame, after we no longer need this sg
-        gReplayInputBuffer[bufferInd].temporalSeed = sgScatterRays.rng.state;
 
-        rayData.d.preRcThp = pre_rc_thp; //DEBUGGING FOR THE RANDOM REPLAY
+        rayData.d.preRcThp = shiftContext.thp_upToIncl_xk; //DEBUGGING FOR THE RANDOM REPLAY
         debugBuffer[bufferInd] = rayData.d;
     }
     else
@@ -972,7 +1040,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         debugBuffer[bufferInd] = {};
     }
 
-    gPathDebugBuffer[bufferInd] = debugPath;
+    gPathViewerPathBuffer[bufferInd] = pathViewerPath;
 
     return r;
 }
@@ -1153,3 +1221,16 @@ void rayGen()
         outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
     #endif
 }
+
+/**
+Restir Gen Candidates Pass
+
+What it needs to do:
+- make fresh samples every frame
+- record data abt those samples that is needed for resampling
+- populate a buffer of path viewer data so we can visualize the paths
+- record data needed to replay these paths later
+
+Notes
+- r.X.k will be 0 if you missed the scene or the reservoir just never got a sample (wi stayed 0) 
+*/

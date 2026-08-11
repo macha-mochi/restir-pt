@@ -9,13 +9,13 @@ struct Sample {
     RCVertex rcVertex; // struct with reconnection vertex data
     PathState path;    // we will only use the vertex index and nee type fields
     uint seed;
-    uint postRCSeed; // only used if we need to replay the path after RC, temporally
+    uint postRCSeed; // the seed of x_(k+1) if we need to replay the path after RC, temporally OR in the case of k = d and nee, the state of rng when we sampled nee
     uint k;  // rcVertexIndex. 0 is camera, 1 is primary hit, etc. This should be >= 2
     float J; // holds denominator of jacobian calc'd from base path, so we don't have to recompute when resampling
 
     __init() {
         this.p_hat = { 0.f, 0.f, 0.f };
-        this.w_i = 0.f;
+        this.w_i = 0.f; 
         this.rcVertex = {};
         this.path = {};
 
