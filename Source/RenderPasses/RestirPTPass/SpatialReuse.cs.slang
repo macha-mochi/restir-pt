@@ -34,6 +34,7 @@ struct SpatialReusePass {
     StructuredBuffer<Reservoir> temporalBuffer;
     StructuredBuffer<float3> di_bgBuffer;
     StructuredBuffer<int2> spatialOffsetBuffer; // stores the offsets from a pixel, which could take on negative values
+    StructuredBuffer<RandomReplayOutput> replayedDataBuffer;
     // Outputs
     RWStructuredBuffer<Reservoir> outputBuffer;
     RWTexture2D<float4> outputColor;
@@ -63,6 +64,8 @@ struct SpatialReusePass {
 
     void execute(uint2 pixel) {
         if (any(pixel >= gOutputDimensions)) return; // return if oob
+
+        outputColor[pixel] = float4(0, 0, 0, 1);
 
         Reservoir r = {}; //copy the input reservoir
 
@@ -177,13 +180,14 @@ struct SpatialReusePass {
             if (r.updateReservoir(neighbor_curDomain, w_i, inputBuffer[ind(neighbor)].c, sg))
             {
                 debugData.dummy = 2.f;
+                outputColor[pixel] = float4(0, 1, 0, 1);
             }
         }
 
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
 
-        outputColor[pixel] = float4(outputBuffer[ind(pixel)].X.p_hat * outputBuffer[ind(pixel)].W_X + di_bgBuffer[ind(pixel)], 1);
+        outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
     }
 }
 

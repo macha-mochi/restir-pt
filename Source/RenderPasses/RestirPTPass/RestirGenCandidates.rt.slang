@@ -224,49 +224,6 @@ struct ScatterRayData
     }
 };
 
-/** Describes a path vertex.
- */
-struct PathVertex
-{
-    uint index;        ///< Vertex index (0 = camera, 1 = primary hit, 2 = secondary hit, etc.).
-    float3 pos;        ///< Vertex position.
-    float3 faceNormal; ///< Geometry normal at the vertex (zero if not on a surface).
-    bool frontFacing;  ///< True if path vertex is on the front-facing side (if on a surface).
-
-    /** Initializes a path vertex.
-        \param[in] index Vertex index.
-        \param[in] pos Vertex position.
-        \param[in] faceNormal Geometry normal.
-        \param[in] frontFacing Front-facing flag.
-    */
-    __init(uint index, float3 pos, float3 faceNormal = float3(0.f), bool frontFacing = true)
-    {
-        this.index = index;
-        this.pos = pos;
-        this.faceNormal = faceNormal;
-        this.frontFacing = frontFacing;
-    }
-    static PathVertex NULL = { -1, float3(0.f), float3(0.f), false };
-
-    /** Get position with offset applied in direction of the geometry normal to avoid self-intersection
-        for visibility rays.
-        \param[in] rayDir Direction of the visibility ray (does not need to be normalized).
-        \return Returns the offseted position.
-    */
-    float3 getRayOrigin(float3 rayDir)
-    {
-        return computeRayOrigin(pos, dot(faceNormal, rayDir) >= 0 ? faceNormal : -faceNormal);
-    }
-
-    /** Returns the oriented face normal.
-        \return Face normal flipped to the same side as the view vector.
-    */
-    float3 getOrientedFaceNormal()
-    {
-        return frontFacing ? faceNormal : -faceNormal;
-    }
-};
-
 /**
  * Returns the primary ray's direction.
  */
@@ -955,7 +912,6 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     shiftContext.rcVertexInd = rayData.path.getVertexIndex();
                 }
 
-                //it can't be that rc vertex got set to k and we missed at k
                 if (rayData.path.getVertexIndex() == shiftContext.rcVertexInd) {
                     shiftContext.thp_upToIncl_xk = rayData.p_hat_thp;
                     shiftContext.jacobian_denom = rayData.sampleData.j_denom; // this "capture" of jacobian denom should work for hybrid and RC shifts, if we found valid vertex
@@ -967,28 +923,36 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                     rcVertex = RCVertex(rayData.direction, rayData.pdf, { 0.f, 0.f, 0.f }, rayData.sampleData.rcPackedHitInfo,
                     rayData.prevSampledLobeType, rayData.sampledLobeType);
                 }
+            } else {
+                // it is possible that rc vertex was k and we missed at k (reconnection shift). wont be possible for hybrid
+                if (rayData.path.getVertexIndex() == shiftContext.rcVertexInd) {
+                    shiftContext.thp_upToIncl_xk = rayData.p_hat_thp; // do this so that if rc and k = d bsdf env map, incomingRadiance will be Le from the env map
+                    // raydata.sampledlobetype is currently for x1, and we dont have a lobetype for x2 so we do lobetype::all
+                    rcVertex = RCVertex(float3(0.f), 0.f, float3(0.f), uint4(0), rayData.sampledLobeType, (uint)LobeType::All);
+                }
             }
 
             curBSDFSample = Sample(rayData.sampleData.bsdf_p_hat, rayData.sampleData.bsdf_w_i, rcVertex, rayData.path);
-            if (shiftContext.rcVertexInd == 0) { // we havent found a rc vert yet so set k = d
-                // rc vertex outgoing dir and pdf will be 0
-                float3 xk_radiance = float3(0.f);
-                // rayData lobe types r accurate for emissive. but one off for env map
-                uint kMinus1_lobeType = rayData.prevSampledLobeType;
-                uint k_lobeType = rayData.sampledLobeType;
-                if(rayData.path.isTerminated()){
-                    xk_radiance = curBSDFSample.p_hat / rayData.p_hat_thp; //hit env map. but hit info at xk must be invalid.
-                    kMinus1_lobeType = rayData.sampledLobeType; // this info is still for x(k-1) bc handleHit wasn't called when we missed
-                    k_lobeType = (uint)LobeType::All; // following NEE conventions: if its a light source use lobetype::all
-                } //meanwhile if we didn't hit env map, incoming radiance will be 0 but the hit info will be valid
-
-                // rc vertex outgoing dir and pdf will be 0 bc k = d
-                RCVertex bsdf_kEqualsD = { float3(0),        0,         xk_radiance, rayData.sampleData.rcPackedHitInfo, kMinus1_lobeType, k_lobeType };
-                curBSDFSample.rcVertex = bsdf_kEqualsD;
+            if (shiftContext.rcVertexInd == 0) { // we havent found a rc vert yet (also this is hybrid shift) so set k = d
+                if (rayData.path.isTerminated()) {
+                    // if env map, rc vertex outgoing dir will be the dir that led to x_k, and pdf will bsdf pdf of that ray
+                    curBSDFSample.rcVertex = { rayData.direction,       rayData.pdf, 
+                                                curBSDFSample.p_hat / rayData.p_hat_thp, uint4(0),
+                        rayData.sampledLobeType, (uint)LobeType::All};
+                    //Le from env map = curBSDFSample.p_hat / rayData.p_hat_thp
+                    // hit info at x_k must be invalid
+                    // sampledLobeType holds lobe sampled at x(k-1) bc handleHit wasn't called when we missed so lobeType data is one off for env map
+                    // and following NEE conventions: if its a light source use lobetype::all
+                } else {
+                    // meanwhile if we didn't hit env map,we hit emissive triangle
+                    // since k = d, use 0 for dir and pdf. need the raw emission from last vertex but you can recover from hit info.
+                    // since gen scatter ray included in handleHit, sampeldLobeType is currently for x_k. we won't use it in this case though
+                    curBSDFSample.rcVertex = { float3(0), 0.f, float3(0), rayData.sampleData.rcPackedHitInfo, rayData.prevSampledLobeType, rayData.sampledLobeType };
+                }
                 // path seed (from beginning of path) gets set at the end
                 curBSDFSample.postRCSeed = 0; // invalid bc you can't replay if k = d
             } else {
-                curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / shiftContext.thp_upToIncl_xk;
+                curBSDFSample.rcVertex.incomingRadiance = curBSDFSample.p_hat / shiftContext.thp_upToIncl_xk; // if reconnection shift and d = 2: thp only includes x1
                 // rc vertex all set. path seed (from beginning of path) gets set at the end
                 curBSDFSample.postRCSeed = shiftContext.x_kPlus1_seed; // seed of gen scatter ray from x_(k+1)
             }
@@ -996,7 +960,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             if (r.updateReservoir(curBSDFSample, curBSDFSample.w_i, 1, sg)) {
                 if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
                     r.X.k = 2;
-                    r.X.J = shiftContext.jacobian_denom;
+                    r.X.J = !rayData.path.isTerminated() ? shiftContext.jacobian_denom : 1.f; //what to do if this was a miss? restir pt paper doesnt provide info on this bc its reconnection shift but ill just do 1
                 } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
                     if (shiftContext.rcVertexInd == 0) { // we didn't find an rc vertex
                         r.X.k = rayData.path.getVertexIndex(); //k = d case

@@ -44,6 +44,7 @@ const char kSpatialComputeShaderFile[] = "RenderPasses/RestirPTPass/SpatialReuse
 const char kTemporalComputeShaderFile[] = "RenderPasses/RestirPTPass/TemporalReuse.cs.slang";
 const char kRetracePathsShaderFile[] = "RenderPasses/RestirPTPass/RetracePaths.rt.slang";
 const char kPathViewerShaderFile[] = "RenderPasses/RestirPTPass/PathViewer.cs.slang";
+const char kVisualizePathsShaderFile[] = "RenderPasses/RestirPTPass/VisualizePaths.cs.slang";
 
 //CANDIDATE GENERATION SETTINGS
 // Ray tracing settings that affect the traversal stack size.
@@ -299,14 +300,45 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     pRenderContext->copyResource(mpTemporalVBuffer.get(), renderData.getTexture(kInputVBuffer).get());
     pRenderContext->copyResource(mpTemporalViewDir.get(), renderData.getTexture(kInputViewDir).get());
     //the buffer that input reservoir id points to was actually the one that just got output written to it it just got switched in prep for next round
-    
+    if (mVisualizePathInfo)
+    {
+        VisualizePathsPass(pRenderContext, renderData, mInputReservoirID);
+    }
     std::swap(mInputReservoirID, mTemporalReservoirID);
     std::swap(mReplayInputID, mTemporalReplayInputID);
 
     mFrameCount++;
 }
 
-void RestirPTPass::GenSpatialOffsetsPass(RenderContext* pRenderContext, const RenderData& renderData) {
+/** Last param: index of the buffer whose samples you want to view debug colors for
+*/
+void RestirPTPass::VisualizePathsPass(RenderContext* pRenderContext, const RenderData& renderData, uint bufferInd)
+{
+    if (!mpVisualizePathsPass)
+    {
+        DefineList defines;
+        if (mpSampleGenerator)
+        {
+            defines.add(mpSampleGenerator->getDefines());
+        }
+
+        ProgramDesc desc;
+        desc.addShaderLibrary(kVisualizePathsShaderFile);
+        desc.csEntry("main");
+        mpVisualizePathsPass = ComputePass::create(mpDevice, desc, defines);
+    }
+
+    auto var = mpVisualizePathsPass->getRootVar();
+    var["CB"]["gFrameCount"] = mFrameCount;
+    var["CB"]["gOutputDimensions"] = targetDim;
+    var["gReservoirBuffer"] = mpReservoirBuffers[bufferInd];
+    var["gOutputColor"] = renderData.getTexture(kOutputColor);
+
+    mpVisualizePathsPass->execute(pRenderContext, targetDim.x, targetDim.y);
+}
+
+void RestirPTPass::GenSpatialOffsetsPass(RenderContext* pRenderContext, const RenderData& renderData)
+{
     if (!mpGenSpatialOffsetsPass) // create the compute pass if it doesn't exist yet
     {
         DefineList defines;
@@ -320,12 +352,14 @@ void RestirPTPass::GenSpatialOffsetsPass(RenderContext* pRenderContext, const Re
         mpGenSpatialOffsetsPass = ComputePass::create(mpDevice, desc, defines);
     }
 
-    //Defines
+    // Defines
     auto program = mpGenSpatialOffsetsPass->getProgram();
     program->addDefine("NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors));
     program->addDefine("SPATIAL_NEIGHBOR_RADIUS", std::to_string(mSpatialNeighborRadius));
 
     auto var = mpGenSpatialOffsetsPass->getRootVar();
+    var["CB"]["gFrameCount"] = mFrameCount;
+    var["CB"]["gOutputDimensions"] = targetDim;
     var["spatialOffsetBuffer"] = mpSpatialOffsetBuffer;
 
     mpGenSpatialOffsetsPass->execute(pRenderContext, targetDim.x, targetDim.y);
@@ -461,7 +495,18 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
         }
         passVar["debugBuffer"] = mpSpatialDebugBuffer;
     }
-    
+
+    // Samplers bind to root var because they are needed in ShiftMapping which we import
+    if (mpEmissiveSampler)
+    {
+        // TODO: Do we have to bind this every frame?
+        mpEmissiveSampler->bindShaderData(var["emissiveSampler"]);
+    }
+    if (mpEnvMapSampler)
+    {
+        // TODO: Do we have to bind this every frame?
+        mpEnvMapSampler->bindShaderData(var["envMapSampler"]);
+    }
     mpScene->bindShaderData(var["gScene"]); // binds the Scene parameter block (as seen in Scene.slang w all the vertex and geometry buffers
 
     pPass->execute(pRenderContext, targetDim.x, targetDim.y);
@@ -549,7 +594,10 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
     widget.tooltip("What type of shift mapping to use for spatial/temporal reuse.", true);
 
     dirty |= widget.checkbox("Pause renderer and use path viewer", mUsePathViewer);
-    widget.tooltip("Whether we should pause the renderer and allow user to click a pixel to display its final path", true);
+    widget.tooltip("Whether we should pause the renderer and allow user to click a pixel to display its final path in space", true);
+
+    dirty |= widget.checkbox("Visualize path info", mVisualizePathInfo);
+    widget.tooltip("Whether information about the final path at each pixel is shown using debug colors", true);
 
     // If rendering options that modify the output have changed, set flag to indicate that.
     // In execute() we will pass the flag to other passes for reset of temporal data etc.
@@ -752,12 +800,18 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         mpSpatialReusePass = createComputePass(
             kSpatialComputeShaderFile, "main",
             {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)},
-             {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)}}
+             {"NUM_SPATIAL_NEIGHBORS", std::to_string(mNumSpatialNeighbors)},
+             {"USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0"},
+            {"USE_EMISSIVE_LIGHTS", mpScene->useEmissiveLights() ? "1" : "0"},
+            {"USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0"}}
         );
         mpTemporalReusePass = createComputePass(
             kTemporalComputeShaderFile, "main",
             {{"SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType)},
-             {"IS_LAST_PASS", "0"}}
+             {"IS_LAST_PASS", "0"},
+             {"USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0"},
+            {"USE_EMISSIVE_LIGHTS", mpScene->useEmissiveLights() ? "1" : "0"},
+             {"USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0"}}
         );
     }
 }

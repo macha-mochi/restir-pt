@@ -1,23 +1,243 @@
+#include "Utils/Math/MathConstants.slangh"
+
 import RestirReservoir;
 import PathState;
 import RestirHelpers;
 import Scene.Raytracing;
 import Utils.Sampling.SampleGenerator;
+import Rendering.Lights.EnvMapSampler;
+import Rendering.Lights.EmissiveLightSampler;
+import Rendering.Lights.EmissiveLightSamplerHelpers;
+import Rendering.Lights.LightHelpers;
+import Utils.Geometry.GeometryHelpers;
+
+static const float kRayTMax = FLT_MAX;
+static const bool kUseAnalyticLights = USE_ANALYTIC_LIGHTS;
+static const bool kUseEmissiveLights = USE_EMISSIVE_LIGHTS;
+static const bool kUseEnvLight = USE_ENV_LIGHT;
+
+ParameterBlock<EnvMapSampler> envMapSampler; ///< Environment map sampler. Only valid when kUseEnvLight == true.
+ParameterBlock<EmissiveLightSampler> emissiveSampler; ///< Emissive light sampler. Only valid when kUseEmissiveLights == true.
 
 struct ShiftDebugData {
     float misWeight;
-    float bsdfpdf;
-    float neepdf;
+    float3 rcThp;
+    float3 incomingRadiance;
 
     __init() {
         misWeight = 0;
-        bsdfpdf = 0;
-        neepdf = 0;
+        rcThp = float3(0.f);
+        incomingRadiance = float3(0.f);
     }
 }
 
+// LIGHT SAMPLING / NEE FUNCTIONS
+
+/** Generates a light sample on the environment map.
+    \param[in] vertex Path vertex.
+    \param[in,out] sg Sample generator.
+    \param[out] ls Struct describing valid samples.
+    \return True if the sample is valid and has nonzero contribution, false otherwise.
+*/
+bool generateEnvMapSample(const PathVertex vertex, inout SampleGenerator sg, out LightSample ls)
+{
+    ls = {}; // Default initialization to avoid divergence at returns.
+
+    if (!kUseEnvLight) return false;
+
+    // Sample environment map.
+    EnvMapSample lightSample;
+    if (!envMapSampler.sample(sampleNext2D(sg), lightSample)) return false;
+
+    // Setup returned sample.
+    ls.Li = lightSample.pdf > 0.f ? lightSample.Le / lightSample.pdf : float3(0);
+    ls.pdf = lightSample.pdf;
+    ls.origin = vertex.getRayOrigin(lightSample.dir);
+    ls.distance = kRayTMax;
+    ls.dir = lightSample.dir;
+    ls.g = 1.f; // since env map stays in solid angle
+
+    return any(ls.Li > 0.f);
+}
+
+/** Generates a light sample on the emissive geometry.
+    \param[in] vertex Path vertex.
+    \param[in] upperHemisphere True if only upper hemisphere should be considered.
+    \param[in,out] sg Sample generator.
+    \param[out] ls Struct describing valid samples.
+    \return True if the sample is valid and has nonzero contribution, false otherwise.
+*/
+bool generateEmissiveSample(const PathVertex vertex, const bool upperHemisphere, inout SampleGenerator sg, out LightSample ls)
+{
+    ls = {}; // Default initialization to avoid divergence at returns.
+    if (!kUseEmissiveLights) return false;
+
+    TriangleLightSample tls;
+    if (!emissiveSampler.sampleLight(vertex.pos, vertex.getOrientedFaceNormal(), upperHemisphere, sg, tls))
+    {
+        return false;
+    }
+
+    // Setup returned sample.
+    ls.Li = tls.pdf > 0.f ? tls.Le / tls.pdf : float3(0);
+    ls.pdf = tls.pdf;
+    // Offset shading and light position to avoid self-intersection.
+    float3 lightPos = computeRayOrigin(tls.posW, tls.normalW);
+    ls.origin = vertex.getRayOrigin(lightPos - vertex.pos);
+    float3 toLight = lightPos - ls.origin;
+    ls.distance = length(toLight);
+    ls.dir = normalize(toLight);
+
+    // Calculate geometry term. info needed: cos at light and distance to light which we have
+    ls.g = abs(dot(tls.normalW, -ls.dir)) / (ls.distance * ls.distance);
+
+    return any(ls.Li > 0.f);
+}
+
+/** Generates a light sample on the analytic lights.
+    \param[in] vertex Path vertex.
+    \param[in,out] sg Sample generator.
+    \param[out] ls Struct describing valid samples.
+    \return True if the sample is valid and has nonzero contribution, false otherwise.
+*/
+bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator sg, out LightSample ls)
+{
+    ls = {}; // Default initialization to avoid divergence at returns.
+
+    uint lightCount = gScene.getLightCount();
+    if (!kUseAnalyticLights || lightCount == 0) return false;
+
+    // Sample analytic light source selected uniformly from the light list.
+    // TODO: Sample based on estimated contributions as pdf.
+    uint lightIndex = min(uint(sampleNext1D(sg) * lightCount), lightCount - 1);
+
+    // Sample local light source.
+    AnalyticLightSample lightSample;
+    LightData ld = gScene.getLight(lightIndex);
+    if (!sampleLight(vertex.pos, ld, sg, lightSample)) return false;
+
+    // Setup returned sample.
+    ls.pdf = (lightSample.pdf == 0 ? 1.f : lightSample.pdf) / lightCount; // handle the Point and Directional pdfs being 0
+    ls.Li = lightSample.Li * lightCount;
+    // Offset shading position to avoid self-intersection.
+    ls.origin = vertex.getRayOrigin(lightSample.dir);
+    // Analytic lights do not currently have a geometric representation in the scene.
+    // Do not worry about adjusting the ray length to avoid self-intersections at the light.
+    ls.distance = lightSample.distance;
+    ls.dir = lightSample.dir;
+    ls.g = (ls.distance == kMaxLightDistance || lightSample.pdf == 0) ? 1.f : (abs(dot(-ls.dir, lightSample.normalW)) / (ls.distance * ls.distance));
+    // if dist squared is infinity you cant convert to area
+
+    return any(ls.Li > 0.f);
+}
+
+/** Return the probabilities for selecting different light types.
+    \param[out] p Probabilities.
+*/
+void getLightTypeSelectionProbabilities(out float p[3])
+{
+    // Set relative probabilities of the different sampling techniques.
+    // TODO: These should use estimated irradiance from each light type. Using equal probabilities for now.
+    p[0] = kUseEnvLight ? 1.f : 0.f;
+    p[1] = kUseEmissiveLights ? 1.f : 0.f;
+    p[2] = kUseAnalyticLights ? 1.f : 0.f;
+
+    // Normalize probabilities. Early out if zero.
+    float sum = p[0] + p[1] + p[2];
+    if (sum == 0.f) return;
+
+    float invSum = 1.f / sum;
+    p[0] *= invSum;
+    p[1] *= invSum;
+    p[2] *= invSum;
+}
+
+float getEnvMapSelectionProbability() { float p[3]; getLightTypeSelectionProbabilities(p); return p[0]; }
+float getEmissiveSelectionProbability() { float p[3]; getLightTypeSelectionProbabilities(p); return p[1]; }
+float getAnalyicSelectionProbability() { float p[3]; getLightTypeSelectionProbabilities(p); return p[2]; }
+
+/** Select a light type for sampling.
+        \param[out] lightType Selected light type.
+        \param[out] pdf Probability for selected type.
+        \param[in,out] sg Sample generator.
+        \return Return true if selection is valid.
+    */
+bool selectLightType(out uint lightType, out float pdf, inout SampleGenerator sg)
+{
+    float p[3];
+    getLightTypeSelectionProbabilities(p);
+
+    float u = sampleNext1D(sg);
+
+    [unroll]
+    for (lightType = 0; lightType < 3; ++lightType)
+    {
+        if (u < p[lightType])
+        {
+            pdf = p[lightType];
+            return true;
+        }
+        u -= p[lightType];
+    }
+
+    lightType = {};
+    pdf = {};
+
+    return false;
+}
+
+/** Samples a light source in the scene.
+       This function first stochastically selects a type of light source to sample,
+       and then calls that the sampling function for the chosen light type.
+       \param[in] vertex Path vertex.
+       \param[in] sampleUpperHemisphere True if the upper hemisphere should be sampled.
+       \param[in] sampleLowerHemisphere True if the lower hemisphere should be sampled.
+       \param[in,out] sg Sample generator.
+       \param[out] ls Struct describing valid samples.
+       \return True if the sample is valid and has nonzero contribution, false otherwise.
+   */
+bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphere, const bool sampleLowerHemisphere, inout SampleGenerator sg, out LightSample ls)
+{
+    ls = {};
+
+    uint lightType;
+    float selectionPdf;
+    if (!selectLightType(lightType, selectionPdf, sg)) return false;
+
+    bool valid = false;
+    if (kUseEnvLight && lightType == (uint)NEELightType::EnvMap)
+    {
+        valid = generateEnvMapSample(vertex, sg, ls);
+    }
+    if (kUseEmissiveLights && lightType == (uint)NEELightType::Emissive)
+    {
+        // Emissive light samplers have an option to exclusively sample the upper hemisphere.
+        bool upperHemisphere = sampleUpperHemisphere && !sampleLowerHemisphere;
+        valid = generateEmissiveSample(vertex, upperHemisphere, sg, ls);
+    }
+    if (kUseAnalyticLights && lightType == (uint)NEELightType::Analytic)
+    {
+        valid = generateAnalyticLightSample(vertex, sg, ls);
+    }
+    if (!valid) return false;
+
+    // Reject samples in non-requested hemispheres.
+    float NdotL = dot(vertex.getOrientedFaceNormal(), ls.dir);
+    if ((!sampleUpperHemisphere && NdotL >= -kMinCosTheta) || (!sampleLowerHemisphere && NdotL <= kMinCosTheta))
+    {
+        return false;
+    }
+
+    // Account for light type selection.
+    ls.lightType = lightType;
+    ls.pdf *= selectionPdf;
+    ls.Li /= selectionPdf;
+
+    return true;
+}
+
 /**
- * Traces a shadow ray towards a light source.
+ * Traces a shadow ray, checks occlusion.
  * @param[in] origin Ray origin for the shadow ray.
  * @param[in] dir Direction from shading point towards the light source (normalized).
  * @param[in] distance Distance to the light source.
@@ -39,16 +259,52 @@ bool traceShadowRay(float3 origin, float3 dir, float distance) {
     if (q.CommittedStatus() == COMMITTED_NOTHING) {
         return true;
     } else {
-        /*if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+        return false;
+    }
+}
+
+/**
+ * Trace a ray and get hit info about the next triangle it hits.
+ * @param[in] origin Ray origin for the shadow ray.
+ * @param[in] dir Direction from shading point towards the light source (normalized).
+ * @param[in] distance Distance to the light source.
+ * @return True if we hit smth (and [packed] is valid), false otherwise
+ */
+bool traceRayClosestHit(float3 origin, float3 dir, float distance, out PackedHitInfo packed) {
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = 0.f;
+    ray.TMax = distance;
+
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+    let rayFlags = RAY_FLAG_NONE; // gets OR'd with the flag passed into rayquery generic
+
+    q.TraceRayInline(gScene.rtAccel, rayFlags, 0xff /* instance inclusion mask */, ray);
+
+    q.Proceed();
+    if (q.CommittedStatus() == COMMITTED_NOTHING) {
+        return false;
+    } else {
+        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
             TriangleHit triangleHit;
             triangleHit.instanceID = GeometryInstanceID(q.CommittedInstanceID(), q.CommittedGeometryIndex());
             triangleHit.primitiveIndex = q.CommittedPrimitiveIndex();
             triangleHit.barycentrics = q.CommittedTriangleBarycentrics();
-            hitPos = gScene.getVertexData(triangleHit).posW;
-        }*/ // use for debugging if you ever need to find triangle hit data
-        return false;
+            packed = triangleHit.pack();
+        }
+        return true;
     }
 }
+
+/**
+how computeShiftedSample should work for k = d
+
+k = d
+NEE: replay gen light sample using srcX's seed. then re-eval y_(k-1) just like in a normal NEE function (remember to do MIS)
+BSDF: if emissive tri, re calculate the emission at xk and link up y_(k-1)
+      if env map, eval y_(k-1) in the direction of the env map and then multiply by Le
+*/
 
 /** Shifts a path from domain [src] to domain [dst].
 
@@ -75,100 +331,198 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
     let lod1 = ExplicitLodTextureSampler(0.f);
     let y_kMinus1_mi = gScene.materials.getMaterialInstance(y_sd, lod1);
 
-    HitInfo rcHitInfo = HitInfo(srcX.rcVertex.packedHitInfo);
-    if (!rcHitInfo.isValid() || luminance(srcX.rcVertex.incomingRadiance) == 0.f) {
-        return false; // can't do shift if x_k isn't valid. if incoming radiance is 0 the shifted path will have 0 contribution so we can fail it
-        //this step will also exclude the k = d cases
+    //Create variables we will use later
+    float3 rcThp = float3(1.f); //includes new thp at y_(k-1) and y_k if needed
+    float3 incomingRadiance = float3(0.f); // depending on case, could be radiance coming into x_k from x_(k+1), or from x_k into x_(k-1)
+    float jacobian_denom = jacobian;
+
+    // Handle k = d NEE case and BSDF+envmap case, bc these dont need rcVertex
+    if(srcX.k == srcX.path.getVertexIndex()){
+        if (srcX.path.isNEESampled()) {
+            PathVertex vertex_kMinus1 = PathVertex(srcX.path.getVertexIndex() - 1, y_sd.posW, y_sd.faceN, y_sd.frontFacing);
+            SampleGenerator neeSG = SampleGenerator(uint2(0), 0);
+            neeSG.rng.state = srcX.postRCSeed;
+            LightSample ls = {};
+            bool validSample = generateLightSample(vertex_kMinus1, srcX.path.isLightSampledUpper(), srcX.path.isLightSampledLower(), neeSG, ls);
+            if (!validSample) return false; // the base path was valid so if this isnt valid return false
+
+            // trace shadow ray
+            bool visible = traceShadowRay(ls.origin, ls.dir, ls.distance);
+            if (!visible) return false;
+
+            // calc mis weight
+            float bsdfPdf = y_kMinus1_mi.evalPdf(y_sd, ls.dir, true);
+            float misWeight = ls.pdf / (bsdfPdf + ls.pdf);
+
+            rcThp = misWeight * y_kMinus1_mi.eval(y_sd, ls.dir, neeSG);  // this is still same random number as used in gen candidates so its ok
+            incomingRadiance = ls.Li * ls.pdf; // ls.Li is predivided by pdf
+            if (shiftType == ShiftMappingType::Reconnection) {
+                jacobian = ls.g / jacobian_denom; // since we used the same random numbers, we should sample the same light type so g being invalid (i set it to 1.f) shouldnt cause problems
+            } else if (shiftType == ShiftMappingType::Hybrid) {
+                jacobian = ls.pdf * ls.g / jacobian_denom;
+            }
+        } else if(srcX.path.isBSDFSampled()){
+            if (srcX.path.sampledEnvMap()) {
+                // trace shadow ray
+                float3 origin = y_sd.computeRayOrigin();
+                bool visible = traceShadowRay(origin, srcX.rcVertex.outgoingDir, kRayTMax);
+                if (!visible) return false;
+
+                //calc mis weight
+                float bsdfPdf = srcX.rcVertex.outgoingPdf; // actually the pdf incoming to x_k
+                float lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(srcX.rcVertex.outgoingDir); // actually incoming dir to x_k
+                float misWeight = bsdfPdf / (bsdfPdf + lightPdf);
+
+                rcThp = misWeight * y_kMinus1_mi.evalBSDF(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.prevSampledLobeType, sg); // sg used here is just the one passed in
+                incomingRadiance = srcX.rcVertex.incomingRadiance;
+                if(shiftType == ShiftMappingType::Reconnection){
+                    jacobian = 1.f; //CAUTION: not sure if this is right (see comment where r.J was assigned in GenCandidates) but we will probably use hybrid most of the time anyway
+                } else if (shiftType == ShiftMappingType::Hybrid) {
+                    jacobian = bsdfPdf / jacobian_denom; //also not including g bc env map has no valid g
+                }
+            } // leave emissive for rcVertex is valid case
+        } else {
+            return false;
+        }
     }
 
-    // Proceed with re-eval bsdf at y_(k-1)
+    // Get info abt y_(k-1) and rcPos
+    HitInfo rcHitInfo = HitInfo(srcX.rcVertex.packedHitInfo);
+    if (!rcHitInfo.isValid() && srcX.k < srcX.path.getVertexIndex()) {
+        return false; // can't do shift if x_k isn't valid and k < d, since we've yet to handle k = d bsdf emissive case
+    }
     float3 rcPos;
-    if (rcHitInfo.getType() == HitType::Triangle) {
+    if (rcHitInfo.isValid() && rcHitInfo.getType() == HitType::Triangle) {
         // getPrevPosW: where was this triangle last frame? if the mesh itself didn't move then the world space pos should be the same
         rcPos = temporalSrc ? gScene.getPrevPosW(rcHitInfo) : gScene.getVertexData(rcHitInfo.getTriangleHit()).posW;
-    } else {
-        // oither types not supported for now
+    } else if (rcHitInfo.isValid()) {
+        // other types not supported
         return false;
     }
     float3 y_kMinus1_rayOrigin = y_sd.computeRayOrigin();
+    float3 y_kMinus1_normal = y_sd.getOrientedFaceNormal(); 
     float3 toRCVert = rcPos - y_kMinus1_rayOrigin; // use sd.pos- rayOrigin pattern because that is what's used in other parts of falcor. stay consistent! this also prevents self intersections when we trace shadow ray
     float3 rcIncomingDir = normalize(toRCVert);
-    float epsilon = 1e-5f; // shorten shadow ray distance to avoid reporting rcPos as intersection
-    if (!traceShadowRay(y_kMinus1_rayOrigin, rcIncomingDir, length(toRCVert) - epsilon)) { // TODO / CAUTION: this is traced against current BVH / accel structure. in a dynamic scene this will cause bias.
-        return false; // this shift is not valid if x_k is occluded from y_(k-1)
-    }
-    float3 rcThp = y_kMinus1_mi.evalBSDF(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType, sg);
-    float jacobian_denom = jacobian;
-    if (shiftType == ShiftMappingType::Hybrid) {
-        // jacobian numerator: solid angle pdf of y_(k-1) to x_k * G * solid angle pdf of x_k to x_(k+1)
-        // we first get the first pdf / j_denom here
+
+    //covers: k < d case, and k = d bsdf emissive
+    if (srcX.k < srcX.path.getVertexIndex() || srcX.path.isBSDFSampled() && srcX.path.sampledEmissive()) {
+        float epsilon = 1e-5f; // shorten shadow ray distance to avoid reporting rcPos as intersection
+        if (!traceShadowRay(y_kMinus1_rayOrigin, rcIncomingDir, length(toRCVert) - epsilon)) { // TODO / CAUTION: this is traced against current BVH / accel structure. in a dynamic scene this will cause bias.
+            return false; // this shift is not valid if x_k is occluded from y_(k-1)
+        }
+        rcThp = y_kMinus1_mi.evalBSDF(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType, sg);
+        if (any(isnan(rcThp))) rcThp = float3(0, 0, 0);
+
         float p_ykMinus1_xk = y_kMinus1_mi.evalPdf(y_sd, rcIncomingDir, true);
-        jacobian = p_ykMinus1_xk / jacobian_denom;
-    }
-    if (any(isnan(rcThp))) rcThp = float3(0, 0, 0);
-
-    // Now re-eval bsdf at x_k. start by getting sd
-    if (temporalDst) {
-        y_sd = loadTemporalShadingData(rcHitInfo, y_kMinus1_rayOrigin, rcIncomingDir);
-    } else {
-        y_sd = loadShadingData(rcHitInfo, y_kMinus1_rayOrigin, rcIncomingDir);
-    }
-
-    // Calculate jacobians
-    float dstG = abs(dot(y_sd.faceN, -rcIncomingDir)) / dot(toRCVert, toRCVert);
-    if (shiftType == ShiftMappingType::Reconnection) {
-        jacobian = dstG / jacobian_denom; // jacobian: ratio of cos * dist^2, for y1->x2 / x1->x2. jacobian_denom is srcG
-    } else if(shiftType == ShiftMappingType::Hybrid) {
-        // we now have the first p * G / j_denom
-        jacobian *= dstG;
-    }
-
-    //Continue to evaluate bsdf at x_k
-    let lod2 = ExplicitLodTextureSampler(0.f);
-    let x_k_mi = gScene.materials.getMaterialInstance(y_sd, lod2); // mi for y_k = x)k
-    float3 weight2 = x_k_mi.evalBSDF(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType, sg); // bsdf * cos for y2
-    if (any(isnan(weight2))) weight2 = float3(0, 0, 0);
-    rcThp *= weight2;
-    float p_xk_xkPlus1 = x_k_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true);
-    float misWeight = 1.f;
-    if (shiftType == ShiftMappingType::Reconnection) {
-        if (srcX.k == srcX.path.getVertexIndex() - 1) {
-            float p_bsdf = p_xk_xkPlus1;
-            float p_nee = srcX.rcVertex.outgoingPdf;
-            d.bsdfpdf = p_bsdf;
-            d.neepdf = p_nee;
-            if (srcX.path.isBSDFSampled()) {
-                misWeight = p_bsdf / (p_bsdf + p_nee);
-            } else if (srcX.path.isNEESampled()) {
-                misWeight = p_nee / (p_bsdf + p_nee);
-            }
-            d.misWeight = misWeight;
+        if (shiftType == ShiftMappingType::Hybrid) {
+            // jacobian numerator: solid angle pdf of y_(k-1) to x_k * G * solid angle pdf of x_k to x_(k+1)
+            // we first get the first pdf / j_denom here
+            jacobian = p_ykMinus1_xk / jacobian_denom;
         }
-    } else if(shiftType == ShiftMappingType::Hybrid) {
-        // finish calculating jacobian for hybrid shift (form: ratio of pdf * G * pdf)
 
-        // k = d-1 case (x_(k+1) is light vertex):
-        //  thp = prevThp * mis weight * re eval at y_k-1 * re eval at x_k * Li
-        // light sampling terms should cancel in the jacobian, leaving it just p of y_k-1 to x_k * G
-        //  but you need the nee pdf anyway for the mis weight. bsdf pdf is easily calc-able
-        if (srcX.k == srcX.path.getVertexIndex() - 1) { // getVertexIndex will return index of the last vertex on the path x
-            float p_bsdf = p_xk_xkPlus1;
-            float p_nee = srcX.rcVertex.outgoingPdf;
-            if (srcX.path.isBSDFSampled()) {
-                misWeight = p_bsdf / (p_bsdf + p_nee);
-            } else if (srcX.path.isNEESampled()) {
-                misWeight = p_nee / (p_bsdf + p_nee);
-                p_xk_xkPlus1 = p_nee;
-            }
+        // Now re-eval bsdf at x_k. start by getting sd
+        if (temporalDst) {
+            y_sd = loadTemporalShadingData(rcHitInfo, y_kMinus1_rayOrigin, rcIncomingDir);
+        } else {
+            y_sd = loadShadingData(rcHitInfo, y_kMinus1_rayOrigin, rcIncomingDir);
         }
-        jacobian *= p_xk_xkPlus1;
-        //k < d-1 case: x_(k+1) is not light vertex
-        // mis weight in thp = 1
+
+        // Calculate jacobians
+        float dstG = abs(dot(y_sd.faceN, -rcIncomingDir)) / dot(toRCVert, toRCVert);
+        if (shiftType == ShiftMappingType::Reconnection) {
+            jacobian = dstG / jacobian_denom; // jacobian: ratio of cos * dist^2, for y1->x2 / x1->x2. jacobian_denom is srcG
+        } else if (shiftType == ShiftMappingType::Hybrid) {
+            // we now have the first p * G / j_denom
+            jacobian *= dstG;
+        }
+
+        // Continue to evaluate bsdf at x_k
+        let lod2 = ExplicitLodTextureSampler(0.f);
+        let x_k_mi = gScene.materials.getMaterialInstance(y_sd, lod2); // mi for y_k = x)k
+
+        float misWeight = 1.f;
+        //Branch: handle k = d bsdf emissive
+        if (srcX.k == srcX.path.getVertexIndex() && srcX.path.isBSDFSampled() && srcX.path.sampledEmissive()) {
+            incomingRadiance = x_k_mi.getProperties(y_sd).emission;
+            //jacobian denom is complete in this case bc no x_(k+1)
+
+            // Calc mis weight if non delta
+            if (srcX.rcVertex.prevSampledLobeType != (uint)LobeType::Delta) {
+                float bsdfPdf = p_ykMinus1_xk;
+                // Prepare hit point struct with data needed for emissive light PDF evaluation.
+                TriangleLightHit lightHit;
+                lightHit.triangleIndex = gScene.lightCollection.getTriangleIndex(rcHitInfo.getInstanceID(), rcHitInfo.getPrimitiveIndex());
+                lightHit.posW = y_sd.posW;
+                lightHit.normalW = y_sd.getOrientedFaceNormal();
+
+                // Evaluate PDF at the hit, had it been generated with light sampling.
+                bool upperHemisphere = srcX.path.isLightSampledUpper() && !srcX.path.isLightSampledLower(); // Emissive light samplers have an option to exclusively sample the upper hemisphere
+                // first 2 args to evalPdf are for the vertex before the light
+                float lightPdf = getEmissiveSelectionProbability() * emissiveSampler.evalPdf(y_kMinus1_rayOrigin, y_kMinus1_normal, upperHemisphere, lightHit);
+
+                misWeight = bsdfPdf / (bsdfPdf + lightPdf);
+            }
+        } else {
+            float3 weight2 = x_k_mi.evalBSDF(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType, sg); // bsdf * cos for y2
+            if (any(isnan(weight2))) weight2 = float3(0, 0, 0);
+            rcThp *= weight2;
+            incomingRadiance = srcX.rcVertex.incomingRadiance;
+
+            float p_bsdf_xk_xkPlus1 = x_k_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true);
+            float pTokPlus1 = 1.f; // this is the pdf of going to x_(k+1). need to include in jacobian for hybrid shift only.
+            //if k < d-1, this is just p_bsdf_xk_xkPlus1, but if k = d-1, need to case on bsdf/nee
+
+            // Find bsdf/nee mis weight if this is k = d-1 path
+            if (srcX.k == srcX.path.getVertexIndex() - 1) {
+                float bsdfPdf = p_bsdf_xk_xkPlus1;
+                float lightPdf = 0.f;
+                if (srcX.path.sampledEnvMap()) {
+                    lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(srcX.rcVertex.outgoingDir);
+                } else if (srcX.path.sampledEmissive()) {
+                    float3 xk_rayOrigin = y_sd.computeRayOrigin();
+                    uint4 packed = uint4(0);
+                    if (traceRayClosestHit(xk_rayOrigin, srcX.rcVertex.outgoingDir, kRayTMax, packed)) {
+                        HitInfo x_kPlus1 = HitInfo(packed);
+                        ShadingData x_kPlus1_sd = loadShadingData(x_kPlus1, xk_rayOrigin, srcX.rcVertex.outgoingDir); //TODO/CAUTION: does not take into acc temporal. also will loading a whole shading data cause a lot of register pressure
+
+                        TriangleLightHit lightHit;
+                        lightHit.triangleIndex = gScene.lightCollection.getTriangleIndex(x_kPlus1.getInstanceID(), x_kPlus1.getPrimitiveIndex());
+                        lightHit.posW = x_kPlus1_sd.posW;
+                        lightHit.normalW = x_kPlus1_sd.getOrientedFaceNormal();
+
+                        bool upperHemisphere = srcX.path.isLightSampledUpper() && !srcX.path.isLightSampledLower(); // when we did nee for this originally we would have set the path flags
+                        lightPdf = getEmissiveSelectionProbability() * emissiveSampler.evalPdf(xk_rayOrigin, y_sd.getOrientedFaceNormal(), upperHemisphere, lightHit);
+                    } else {
+                        // otherwise, we failed to find light in this dir which means non invertible
+                        return false;
+                    }
+                } //else: analytic or left blank, in which case light pdf 0
+
+                //Finally, calc mis weight
+               if(srcX.path.isBSDFSampled()){
+                   misWeight = bsdfPdf / (bsdfPdf + lightPdf);
+                   pTokPlus1 = bsdfPdf;
+               } else if (srcX.path.isNEESampled()) {
+                   misWeight = lightPdf / (lightPdf + bsdfPdf);
+                   pTokPlus1 = lightPdf;
+               }
+            } else {
+                pTokPlus1 = p_bsdf_xk_xkPlus1;
+            }
+
+            if (shiftType == ShiftMappingType::Hybrid) {
+                jacobian *= pTokPlus1; // finish calculating jacobian for hybrid shift (form: ratio of pdf * G * pdf)
+            }
+            
+        }
+        rcThp *= misWeight;
+        d.misWeight = misWeight;
     }
-    rcThp *= misWeight;
 
     // Find p_hat for shifted X
-    Y.p_hat = prevThp * rcThp * srcX.rcVertex.incomingRadiance; // CAUTION / TODO: we assume that incomingRadiance stays the same (that is, k < d and the rest of the path didnt become occluded temporally)
+    Y.p_hat = prevThp * rcThp * incomingRadiance; // CAUTION / TODO: we assume that the rest of the path didnt become occluded temporally, for incomingRadiance
+    d.rcThp = rcThp;
+    d.incomingRadiance = incomingRadiance;
     // you will find shifted w_i afneter this method since we need to eval mis weight
     Y.rcVertex = srcX.rcVertex;
     Y.path = srcX.path;

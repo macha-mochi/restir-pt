@@ -18,6 +18,7 @@ cbuffer CB
 Texture2D<PackedHitInfo> vBuffer;
 Texture2D<float4> viewW;
 StructuredBuffer<RandomReplayInput> inputBuffer;
+StructuredBuffer<RandomReplayInput> temporalInputBuffer;
 
 // Outputs
 RWStructuredBuffer<int2> spatialOffsetBuffer;
@@ -28,21 +29,35 @@ RWTexture2D<float4> outputColor;
 static const bool kUseImportanceSampling = USE_IMPORTANCE_SAMPLING;
 static const float kRayTMax = FLT_MAX;
 static const uint kNumSpatialNeighbors = NUM_SPATIAL_NEIGHBORS;
+static const float kHybridShiftRoughnessThreshold = 0.2f; // got this value from the OG paper
 
 struct ScatterRayData
 {
-    bool terminated;
+    PathState path;
     float3 thp;       ///< The replayed thp
     float3 origin;    ///< Next path segment origin.
     float3 direction; ///< Next path segment direction.
+    float3 normal;    ///< Shading normal at origin. Used for light sampling and MIS weight calculations.
+    float pdf;        ///< Pdf of last path segment (the one leading to the current vertex).
+    float roughness; ///< Roughness at [origin]
+    bool shouldScatter; ///< Should the path continue with another scatter ray
+
+    float dualRayFootprint;
+    uint4 x_kMinus1_hitInfo;
 
     SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
 
     __init(SampleGenerator sg) {
-        terminated = false;
         thp = float3(1.f);
         origin = float3(0.f);
         direction = float3(0.f);
+        shouldScatter = true;
+        path = {};
+        path.setActive();
+        path.setVertexIndex(1); // since we start at x1
+
+        dualRayFootprint = 0.f;
+        x_kMinus1_hitInfo = uint4(0);
 
         this.sg = sg;
     }
@@ -85,6 +100,9 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, float3
             rayData.origin = sd.computeRayOrigin(false);
         }
         rayData.direction = bsdfSample.wo;
+        rayData.normal = sd.getOrientedFaceNormal();
+        rayData.pdf = bsdfSample.pdf;
+        rayData.roughness = mi.getProperties(sd).roughness;
 
         // bsdfsample.weight = f * dot(wo, n) / pdf
         // wo is normalized in world space
@@ -100,6 +118,8 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, float3
 
 void handleHit(const HitInfo hit, inout ScatterRayData rayData)
 {
+    rayData.path.incrementVertexIndex();
+
     // Load shading data.
     ShadingData sd = loadShadingData(hit, rayData.origin, rayData.direction);
 
@@ -107,14 +127,40 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     let lod = ExplicitLodTextureSampler(0.f);
     let mi = gScene.materials.getMaterialInstance(sd, lod);
 
+    // Save info for hybrid shift mapping
+    float3 x_kMinus1 = rayData.origin;
+    float kMinus1_to_k_pdf = rayData.pdf;
+    float3 normalAt_kMinus1 = rayData.normal;
+    float kMinus1_roughness = rayData.roughness;
+
     // Compute ray origin for new rays spawned from the hit.
     float3 rayOrigin = sd.computeRayOrigin();
 
-    // Generate scatter ray for the next path segment.
-    // The raygen shader will continue the path based on the returned payload.
-    if (!generateScatterRay(sd, mi, rayOrigin, rayData))
-    {
-        rayData.terminated = true;
+    if (!rayData.shouldScatter) {
+        // means we just hit x_k-1
+        rayData.x_kMinus1_hitInfo = hit.pack();
+    } else {
+        // Generate scatter ray for the next path segment.
+        // The raygen shader will continue the path based on the returned payload.
+        if (!generateScatterRay(sd, mi, rayOrigin, rayData))
+        {
+            rayData.path.terminate();
+        }
+    }
+
+    // Still test if this vertex could be the rc vertex
+    if (kMinus1_roughness >= kHybridShiftRoughnessThreshold) { // single vertex roughness threshold from restir pt enhanced
+        float3 toX_k = sd.posW - x_kMinus1;
+        float3 dirToX_k = normalize(toX_k);
+        float kMinus1_k = kMinus1_to_k_pdf * abs(dot(sd.getOrientedFaceNormal(), -dirToX_k) / dot(toX_k, toX_k));
+        float k_kMinus1 = rayData.pdf * abs(dot(normalAt_kMinus1, dirToX_k) / dot(toX_k, toX_k));
+        if (kMinus1_k == 0.f || k_kMinus1 == 0.f) {
+            rayData.dualRayFootprint = 0.f;
+        } else {
+            rayData.dualRayFootprint = min(1 / kMinus1_k, 1 / k_kMinus1);
+        }
+    } else {
+        rayData.dualRayFootprint = 0.f;
     }
 }
 
@@ -130,7 +176,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
  * @param[in] frameDim Dimension of the frame in pixels.
  * @param[in] seed The random seed to use
  */
-RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, uint seed, out PathViewerPath path)
+RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomReplayInput replayParams, out PathViewerPath path)
 {
     uint pixelInd = pixel.y * frameDim.x + pixel.x;
     const float3 primaryRayOrigin = gScene.camera.getPosition();
@@ -138,12 +184,19 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, uint seed,
 
     RandomReplayOutput op = {};
 
-    uint stopVertex = inputBuffer[pixelInd].k;
+    uint stopVertex = replayParams.k;
     const HitInfo hit = HitInfo(vBuffer[pixel]);
+    if (stopVertex == 0) {
+        outputColor[pixel] = float4(1, 0, 0, 1);
+    } else {
+        outputColor[pixel] = float4(0, 1, 0, 1);
+    }
+    return op;
+
     if (hit.isValid() && stopVertex > 2)
     {
         SampleGenerator sg = SampleGenerator(0);
-        sg.rng.state = seed;
+        sg.rng.state = replayParams.seed;
 
         ShadingData sd = loadShadingData(hit, primaryRayOrigin, primaryRayDir);
         let lod = ExplicitLodTextureSampler(0.f);
@@ -153,36 +206,65 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, uint seed,
         //Prepare payload
         ScatterRayData rayData = ScatterRayData(sg);
 
+        // Calc primary ray footprint
+        float3 x0_to_x1 = sd.posW - primaryRayOrigin;
+        float primaryRayFootprint = dot(x0_to_x1, x0_to_x1) / abs(dot(sd.getOrientedFaceNormal(), -primaryRayDir));
+        primaryRayFootprint *= 0.02f * 4 * M_PI / 100;
+
         // Generate scatter ray.
         if (!generateScatterRay(sd, mi, rayOrigin, rayData))
-            rayData.terminated = true;
+            rayData.path.terminate();
         path.numNonCameraVertices = 1;
         path.vertices[0] = rayData.origin;
         path.rcIndex = stopVertex;
 
+        outputColor[pixel] = float4(1, 0, 0, 1);
+
         // Follow path into the scene and compute its total contribution, up to the RC vertex.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
-        for (uint vertex = 2; vertex < stopVertex - 1 && !rayData.terminated; vertex++)
+        for (uint vertex = 2; vertex <= stopVertex - 1 && !rayData.path.isTerminated(); vertex++)
         {
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             // when this call finishes thp should be updated for x_[vertex]
             traceScatterRay(rayData);
-            if(rayData.terminated){
-                // ray missed before it hit the kth vertex, so invalidate the thp
+            
+            if(rayData.path.isTerminated()){
+                // ray missed at or before the (k-1)th vertex, so invalidate the thp
                 rayData.thp = float3(0.f);
             } else {
                 path.numNonCameraVertices++;
                 path.vertices[vertex - 1] = rayData.origin;
+
+                // check if this vertex can be the rc vertex. ray must not be terminated because dualRayFootprint gets set at the very end of handleHit, after we check num bounces and generateScatterRay
+                //if the ray missed, or if x(k-1) did not meet roughness threshold, dualRayFootprint is 0.f
+                if (rayData.dualRayFootprint >= primaryRayFootprint) {
+                    op = {}; // if we found a k' < k on the replayed path, this path isn't shiftable bc non invertible, so clear struct and break out
+                    path.rcIndex = vertex;
+                    outputColor[pixel] = float4(0, 1, 0, 1);
+                    break;
+                }
+
+                // Vertex dependent things
+                if (vertex == stopVertex - 2) {
+                    op.replayedThp = rayData.thp; // thp right now is what we want, after hitting x_k-2. Store the info carried by rayData
+                    op.x_kMinus2_pos = rayData.origin;
+                    rayData.shouldScatter = false; // we don't want to generate a scatter ray from x_(k-1) bc it's unneeded work
+                } else if (vertex == stopVertex - 1) {
+                    op.x_kMinus1_hitInfo = rayData.x_kMinus1_hitInfo; // if ray didn't end up hitting anything for x_k-1 theres no valid hit info
+                }
             }
         }
-
-        op.replayedThp = rayData.thp;
     }
-    else
-    {
-        // Missed primary hit or stopVertex <= 2 in which case we dont need replayedThp
+    else if(hit.isValid() && stopVertex == 2){
+        //is just reconnection shift case
         op.replayedThp = float3(1.f);
+        op.x_kMinus2_pos = primaryRayOrigin;
+        op.x_kMinus1_hitInfo = hit.pack();
+    } else
+    {
+        // Missed primary hit or stopVertex < 2 in which case we dont need replayedThp
+        op.replayedThp = float3(0.f);
     }
 
     return op;
@@ -195,8 +277,9 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, uint seed,
 [shader("miss")]
 void scatterMiss(inout ScatterRayData rayData)
 {
-    // Ray missed the scene. Mark the ray as terminated.
-    rayData.terminated = true;
+    // Ray missed the scene. Mark the ray as terminated but increment vertex index anyway
+    rayData.path.incrementVertexIndex();
+    rayData.path.terminate();
 }
 
 //
@@ -273,13 +356,18 @@ void rayGenTemporal()
     // canonical -> last frame for mis (NOTE: this is just tracing in current frame's bvh with current vbuffer. is wrong for scenes w motion)
     // last frame -> this frame for reservoir update
 
-    PathViewerPath path = {};
-    RandomReplayOutput op = tracePath(basePixel, frameDim, inputBuffer[basePixelInd].seed, path);
-    outputBuffer[outputBufferInd] = op;
+    outputColor[basePixel] = float4(0, 0, 0, 1);
 
-    path = {};
-    op = tracePath(basePixel, frameDim, inputBuffer[basePixelInd].temporalSeed, path);
-    outputBuffer[outputBufferInd+1] = op;
+    PathViewerPath path = {};
+    RandomReplayOutput op = tracePath(basePixel, frameDim, inputBuffer[basePixelInd], path);
+    op.sourcePixel = basePixel;
+    outputBuffer[outputBufferInd] = op;
+    replayedPathBuffer[basePixelInd] = path;
+
+    /*path = {};
+    op = tracePath(basePixel, frameDim, temporalInputBuffer[basePixelInd], path); //TODO this should prolly be pixel last frame's id
+    op.sourcePixel = basePixel;
+    outputBuffer[outputBufferInd+1] = op;*/
 }
 
 [shader("raygeneration")]

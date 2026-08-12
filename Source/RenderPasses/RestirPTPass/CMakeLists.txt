@@ -15,6 +15,7 @@ target_sources(RestirPTPass PRIVATE
     PathState.slang
     RetracePaths.rt.slang
     GenerateSpatialNeighbors.cs.slang
+    VisualizePaths.cs.slang
 )
 
 target_copy_shaders(RestirPTPass RenderPasses/RestirPTPass)

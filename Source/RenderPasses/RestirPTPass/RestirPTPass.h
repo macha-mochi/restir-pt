@@ -72,6 +72,7 @@ private:
     void PathRetracePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
     void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
     void GenSpatialOffsetsPass(RenderContext* pRenderContext, const RenderData& renderData);
+    void VisualizePathsPass(RenderContext* pRenderContext, const RenderData& renderData, uint bufferInd);
 
     // Internal state
 
@@ -89,9 +90,9 @@ private:
     /// Use importance sampling for materials.
     bool mUseImportanceSampling = true;
     /// Type of shift mapping used
-    ShiftMappingType mShiftMappingType = ShiftMappingType::Hybrid;
+    ShiftMappingType mShiftMappingType = ShiftMappingType::Reconnection;
     /// Whether to do spatial reuse
-    bool mUseSpatialReuse = false;
+    bool mUseSpatialReuse = true;
     /// Number of spatial neighbors per pixel
     uint mNumSpatialNeighbors = 3;
     ///  Radius that spatial neighbors are picked from in a pixel
@@ -155,4 +156,7 @@ private:
     ref<Buffer> mpReplayPathDataBuffer;
     ref<ComputePass> mpPathViewerPass;
     ref<Buffer> mpPathViewerDebugBuffer;
+
+    bool mVisualizePathInfo = false; //if true, paths continue generating the output color is just diff
+    ref<ComputePass> mpVisualizePathsPass; /// Pass for visualizing path types (length, sample type, etc) with a color
 };
