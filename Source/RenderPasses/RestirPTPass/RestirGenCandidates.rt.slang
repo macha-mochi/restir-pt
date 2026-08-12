@@ -919,7 +919,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 
                     // if kmaxbounces was 0 or we hit env map or scatter ray failed, path would be terminated and we wouldn't reach here
                     // otherwise, we hit smth in the scene and the scatter ray succeeded so it's a valid path
-                    // if gen scatter ray succeeded, rayData.direction is dir from xk to x(k+1)
+                    // if gen scatter ray succeeded, rayData.direction is dir from xk to x(k+1). rayDAta.sampledLobeType is lobe sampled at x_k
                     rcVertex = RCVertex(rayData.direction, rayData.pdf, { 0.f, 0.f, 0.f }, rayData.sampleData.rcPackedHitInfo,
                     rayData.prevSampledLobeType, rayData.sampledLobeType);
                 }

@@ -447,7 +447,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             //jacobian denom is complete in this case bc no x_(k+1)
 
             // Calc mis weight if non delta
-            if (srcX.rcVertex.prevSampledLobeType != (uint)LobeType::Delta) {
+            if ((srcX.rcVertex.prevSampledLobeType & LobeType::Delta) == 0) {
                 float bsdfPdf = p_ykMinus1_xk;
                 // Prepare hit point struct with data needed for emissive light PDF evaluation.
                 TriangleLightHit lightHit;
@@ -472,8 +472,9 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             float pTokPlus1 = 1.f; // this is the pdf of going to x_(k+1). need to include in jacobian for hybrid shift only.
             //if k < d-1, this is just p_bsdf_xk_xkPlus1, but if k = d-1, need to case on bsdf/nee
 
-            // Find bsdf/nee mis weight if this is k = d-1 path
-            if (srcX.k == srcX.path.getVertexIndex() - 1) {
+            // Find bsdf/nee mis weight if this is k = d-1 path and x_k was not delta.
+            // if delta, pTokPlus1 will get set to p_bsdf. this is correct for hybrid shift bc you shouldnt have a delta x_k and nee sampled k+1 anyway
+            if (srcX.k == srcX.path.getVertexIndex() - 1 && (srcX.rcVertex.sampledLobeType & LobeType::Delta) == 0) {
                 float bsdfPdf = p_bsdf_xk_xkPlus1;
                 float lightPdf = 0.f;
                 if (srcX.path.sampledEnvMap()) {

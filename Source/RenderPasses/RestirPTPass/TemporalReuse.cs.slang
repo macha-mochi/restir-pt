@@ -128,15 +128,6 @@ struct TemporalReusePass {
             }
             if (success) {
                 m_den += temporalBuffer[ind(pixelLastFrame)].c * luminance(Y_lastFrame.p_hat) * inverse_jacobian;
-                if (any(isnan(Y_lastFrame.p_hat))) {
-                    outputColor[pixel] = float4(1, 0, 0, 1);
-                }
-                if (any(isnan(d.rcThp))) {
-                    outputColor[pixel] = float4(1, 1, 0, 1);
-                }
-                if (any(isnan(d.incomingRadiance))) {
-                    outputColor[pixel] = float4(1, 0, 1, 1);
-                }
             }
         }
         float w_i = (m_num / m_den) * luminance(inputBuffer[ind(pixel)].X.p_hat) * inputBuffer[ind(pixel)].W_X; // jacobian is 1 bc alr in right domain
@@ -201,10 +192,10 @@ struct TemporalReusePass {
 
         #if IS_LAST_PASS
         // If this is the last pass, should calculate the output color
-            //outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
+            outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
         #endif
 
-        outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
+        //outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
 
     }
 }
