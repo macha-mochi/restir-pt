@@ -401,6 +401,7 @@ void RestirPTPass::PathRetracePass(RenderContext* pRenderContext, const RenderDa
     ref<RtProgramVars> pVars = isTemporal ? mReplayTracer.pVarsTemporal : mReplayTracer.pVarsSpatial;
     auto var = pVars->getRootVar();
     var["CB"]["gFrameCount"] = mFrameCount;
+    var["CB"]["gOutputDimensions"] = targetDim;
     var["vBuffer"] = renderData.getTexture(kInputVBuffer);
     var["viewW"] = renderData.getTexture(kInputViewDir);
     var["inputBuffer"] = mpReplayInputBuffers[mReplayInputID];
@@ -432,6 +433,13 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     }
     bool lastPass = (isTemporal && !mUseSpatialReuse);
     program->addDefine("IS_LAST_PASS", lastPass ? "1" : "0");
+    if (mpEmissiveSampler)
+    {
+        program->addDefines(mpEmissiveSampler->getDefines());
+    }
+    program->addDefine("USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0");
+    program->addDefine("USE_EMISSIVE_LIGHTS", mpScene->useEmissiveLights() ? "1" : "0");
+    program->addDefine("USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0");
 
     auto var = pPass->getRootVar();
     var["CB"]["gFrameCount"] = mFrameCount;
@@ -782,7 +790,10 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         {
             DefineList defines;
             mpScene->getShaderDefines(defines);
-            
+            if (mpEmissiveSampler)
+            {
+                defines.add(mpEmissiveSampler->getDefines());
+            }
             defines.add(mpSampleGenerator->getDefines());
             for (std::pair<std::string, std::string> def : customDefines)
             {

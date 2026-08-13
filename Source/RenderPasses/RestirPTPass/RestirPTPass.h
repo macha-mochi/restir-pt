@@ -90,15 +90,15 @@ private:
     /// Use importance sampling for materials.
     bool mUseImportanceSampling = true;
     /// Type of shift mapping used
-    ShiftMappingType mShiftMappingType = ShiftMappingType::Reconnection;
+    ShiftMappingType mShiftMappingType = ShiftMappingType::Hybrid;
     /// Whether to do spatial reuse
     bool mUseSpatialReuse = true;
     /// Number of spatial neighbors per pixel
-    uint mNumSpatialNeighbors = 3;
+    uint mNumSpatialNeighbors = 1;
     ///  Radius that spatial neighbors are picked from in a pixel
     uint mSpatialNeighborRadius = 20;
     /// Whether to do temporal reuse
-    bool mUseTemporalReuse = true;
+    bool mUseTemporalReuse = false;
 
     // Runtime data
 

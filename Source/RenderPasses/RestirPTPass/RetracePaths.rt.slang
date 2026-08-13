@@ -11,7 +11,8 @@ import RestirHelpers;
 
 cbuffer CB
 {
-    uint gFrameCount;    // Frame count since scene was loaded.
+    uint gFrameCount; // Frame count since scene was loaded.
+    uint2 gOutputDimensions;
 }
 
 // Inputs
@@ -186,12 +187,6 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
 
     uint stopVertex = replayParams.k;
     const HitInfo hit = HitInfo(vBuffer[pixel]);
-    if (stopVertex == 0) {
-        outputColor[pixel] = float4(1, 0, 0, 1);
-    } else {
-        outputColor[pixel] = float4(0, 1, 0, 1);
-    }
-    return op;
 
     if (hit.isValid() && stopVertex > 2)
     {
@@ -218,12 +213,17 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
         path.vertices[0] = rayData.origin;
         path.rcIndex = stopVertex;
 
-        outputColor[pixel] = float4(1, 0, 0, 1);
-
         // Follow path into the scene and compute its total contribution, up to the RC vertex.
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
         for (uint vertex = 2; vertex <= stopVertex - 1 && !rayData.path.isTerminated(); vertex++)
         {
+            // Vertex dependent things
+            if (vertex == stopVertex - 1) { //we are about to hit x_k-1 
+                op.replayedThp = rayData .thp; // thp right now is what we want, having just hit x_k-2. Store the info carried by rayData
+                op.x_kMinus2_pos = rayData.origin;
+                rayData.shouldScatter = false; // we don't want to generate a scatter ray from x_(k-1) bc it's unneeded work
+            }
+
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             // when this call finishes thp should be updated for x_[vertex]
@@ -241,17 +241,12 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
                 if (rayData.dualRayFootprint >= primaryRayFootprint) {
                     op = {}; // if we found a k' < k on the replayed path, this path isn't shiftable bc non invertible, so clear struct and break out
                     path.rcIndex = vertex;
-                    outputColor[pixel] = float4(0, 1, 0, 1);
                     break;
                 }
 
                 // Vertex dependent things
-                if (vertex == stopVertex - 2) {
-                    op.replayedThp = rayData.thp; // thp right now is what we want, after hitting x_k-2. Store the info carried by rayData
-                    op.x_kMinus2_pos = rayData.origin;
-                    rayData.shouldScatter = false; // we don't want to generate a scatter ray from x_(k-1) bc it's unneeded work
-                } else if (vertex == stopVertex - 1) {
-                    op.x_kMinus1_hitInfo = rayData.x_kMinus1_hitInfo; // if ray didn't end up hitting anything for x_k-1 theres no valid hit info
+                if (vertex == stopVertex - 1) {
+                    op.x_kMinus1_hitInfo = rayData.x_kMinus1_hitInfo; // if ray didn't end up hitting anything for x_k-1 theres no valid hit info. but if it did, store that
                 }
             }
         }
@@ -334,8 +329,8 @@ void scatterDisplacedTriangleMeshClosestHit(inout ScatterRayData rayData, Displa
     handleHit(HitInfo(displacedTriangleHit), rayData);
 }
 
-uint ind(uint2 pixel, uint2 frameDim){
-    return pixel.y * frameDim.x + pixel.x;
+uint ind(uint2 pixel){
+    return pixel.y * gOutputDimensions.x + pixel.x;
 }
 
 //
@@ -349,14 +344,12 @@ void rayGenTemporal()
 
     if (any(basePixel >= frameDim)) return;
 
-    uint basePixelInd = ind(basePixel, frameDim);
+    uint basePixelInd = ind(basePixel);
     uint outputBufferInd = getReplayOutputIndex_T(basePixel, frameDim);
 
     // prev thps needed:
     // canonical -> last frame for mis (NOTE: this is just tracing in current frame's bvh with current vbuffer. is wrong for scenes w motion)
     // last frame -> this frame for reservoir update
-
-    outputColor[basePixel] = float4(0, 0, 0, 1);
 
     PathViewerPath path = {};
     RandomReplayOutput op = tracePath(basePixel, frameDim, inputBuffer[basePixelInd], path);
@@ -364,10 +357,26 @@ void rayGenTemporal()
     outputBuffer[outputBufferInd] = op;
     replayedPathBuffer[basePixelInd] = path;
 
-    /*path = {};
+    path = {};
     op = tracePath(basePixel, frameDim, temporalInputBuffer[basePixelInd], path); //TODO this should prolly be pixel last frame's id
     op.sourcePixel = basePixel;
-    outputBuffer[outputBufferInd+1] = op;*/
+    outputBuffer[outputBufferInd+1] = op;
+}
+
+// Returns the index of the [neighborInd]th offset of [pixel]. FOr exmaple, if i wanted the spatial offset of pixel (x, y) in the first spatial pass, parameters are (x, y) and 0
+// This is 0 indexed!!
+uint getOffsetBufferIndex(uint2 pixel, uint neighborInd) {
+    return getSpatialOffsetBufferIndex(pixel, gOutputDimensions, kNumSpatialNeighbors, neighborInd);
+}
+
+// Returns the pixel coordinates of the [neighborInd]th neighbor of [pixel] in [neighbor]. 1st spatial pass = 0th neighbor. Returns false if it was oob
+bool getSpatialNeighbor(uint2 pixel, uint neighborInd, out int2 neighbor) {
+    int2 offset = spatialOffsetBuffer[getOffsetBufferIndex(pixel, neighborInd)];
+    neighbor = pixel + offset;
+    if (neighbor.x < 0 || neighbor.x >= gOutputDimensions.x || neighbor.y < 0 || neighbor.y >= gOutputDimensions.y) {
+        return false;
+    }
+    return true;
 }
 
 [shader("raygeneration")]
@@ -376,7 +385,7 @@ void rayGenSpatial()
     uint2 basePixel = DispatchRaysIndex().xy;
     uint2 frameDim = DispatchRaysDimensions().xy;
 
-    uint basePixelInd = ind(basePixel, frameDim);
+    uint basePixelInd = ind(basePixel);
     uint outputBufferInd = getReplayOutputIndex_S(basePixel, frameDim, kNumSpatialNeighbors);
     //^^ this will be updated as we get our spatial thps bc there are so many of them.
 
@@ -389,13 +398,47 @@ void rayGenSpatial()
     PathViewerPath path = {};
     RandomReplayOutput op = {};
 
-    /*for(int i = 0; i < kNumSpatialNeighbors; i++)
+    for(int i = 0; i < kNumSpatialNeighbors; i++)
     {
         path = {};
-        op = tracePath(neighborPixel, frameDim, inputBuffer[basePixelInd].seed, path);
+        op = {};
+        int2 neighborPixel;
+        if(getSpatialNeighbor(basePixel, i, neighborPixel)) {
+            op = tracePath(neighborPixel, frameDim, inputBuffer[basePixelInd], path); //using canonical's seed, from each neighbor.
+        }
+        op.sourcePixel = basePixel;
         outputBuffer[outputBufferInd] = op;
         outputBufferInd++;
-    }*/
+    }
+
+    for (int i = 0; i < kNumSpatialNeighbors; i++) {
+        path = {};
+        op = {};
+        int2 neighborPixel;
+        if(getSpatialNeighbor(basePixel, i, neighborPixel)) {
+            op = tracePath(basePixel, frameDim, inputBuffer[ind(neighborPixel)], path); // using neighbor's seed, from canonical.
+            op.sourcePixel = neighborPixel;
+            outputBuffer[outputBufferInd] = op;
+            op.sourcePixel = basePixel;
+            outputBufferInd++;
+
+            for (int j = 0; j < kNumSpatialNeighbors; j++) {
+                if(i == j) continue; //we didnt leave room in buffer for i == j
+                path = {};
+                op = {};
+                int2 otherNeighbor;
+                if (getSpatialNeighbor(basePixel, j, otherNeighbor)) {
+                    op = tracePath(otherNeighbor, frameDim, inputBuffer[ind(neighborPixel)], path); // using [neighbor]'s seed, from canonical's OTHER spatial neighbors.
+                }
+                op.sourcePixel = neighborPixel;
+                outputBuffer[outputBufferInd] = op;
+                outputBufferInd++;
+            }
+        } else {
+            // no valid neighbor at this pos
+            outputBufferInd += kNumSpatialNeighbors;
+        }
+    }
 
 
 }
