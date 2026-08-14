@@ -20,9 +20,8 @@ void main(uint3 threadID: SV_DispatchThreadID)
 
     PathState path = gReservoirBuffer[pixelInd].X.path;
     uint k = gReservoirBuffer[pixelInd].X.k;
-
-    // Visualize by path length
     uint len = path.getVertexIndex();
+
     float4 color;
     switch (len) {
     case 0:
@@ -30,15 +29,18 @@ void main(uint3 threadID: SV_DispatchThreadID)
         break;
     case 2:
         color = float4(1, 0, 0, 1);
+        if (path.isNEESampled()) {
+            color = float4(0, 0, 1, 1);
+        }
         break;
     case 3:
         color = float4(1, 1, 0, 1);
         break;
     case 4:
-        color = float4(0, 1, 0, 1);
+        color = float4(0, 0.5, 0, 1);
         break;
     case 5:
-        color = float4(0, 0, 1, 1); 
+        //color = float4(0, 0, 1, 1); 
         break;
     default:
         color = float4(0, 0, 0, 1);

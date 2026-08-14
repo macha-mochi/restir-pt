@@ -94,7 +94,7 @@ private:
     /// Whether to do spatial reuse
     bool mUseSpatialReuse = true;
     /// Number of spatial neighbors per pixel
-    uint mNumSpatialNeighbors = 1;
+    uint mNumSpatialNeighbors = 3;
     ///  Radius that spatial neighbors are picked from in a pixel
     uint mSpatialNeighborRadius = 20;
     /// Whether to do temporal reuse

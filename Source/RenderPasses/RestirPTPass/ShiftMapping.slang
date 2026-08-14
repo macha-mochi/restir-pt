@@ -263,7 +263,7 @@ bool traceShadowRay(float3 origin, float3 dir, float distance) {
 
     q.TraceRayInline(gScene.rtAccel, rayFlags, 0xff /* instance inclusion mask */, ray);
 
-    while (q.Proceed()) ;
+    while(q.Proceed());
     if (q.CommittedStatus() == COMMITTED_NOTHING) {
         return true;
     } else {
@@ -401,7 +401,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                 if(shiftType == ShiftMappingType::Reconnection){
                     jacobian_num = 1.f; //CAUTION: not sure if this is right (see comment where r.J was assigned in GenCandidates) but we will probably use hybrid most of the time anyway
                 } else if (shiftType == ShiftMappingType::Hybrid) {
-                    jacobian_num = bsdfPdf; //also not including g bc env map has no valid g
+                    jacobian_num = y_kMinus1_mi.evalLobePdf(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.prevSampledLobeType); //also not including g bc env map has no valid g
                 }
             } // leave emissive for rcVertex is valid case
         } else {
@@ -439,8 +439,8 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
         float p_ykMinus1_xk = y_kMinus1_mi.evalPdf(y_sd, rcIncomingDir, true);
         if (shiftType == ShiftMappingType::Hybrid) {
             // jacobian numerator: solid angle pdf of y_(k-1) to x_k * G * solid angle pdf of x_k to x_(k+1)
-            // we get the first p here
-            jacobian_num = p_ykMinus1_xk;
+            // we get the first p here for specific lobe
+            jacobian_num = y_kMinus1_mi.evalLobePdf(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType);
         }
 
         // Now re-eval bsdf at x_k. start by getting sd
@@ -491,14 +491,13 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             rcThp *= weight2;
             incomingRadiance = srcX.rcVertex.incomingRadiance;
 
-            float p_bsdf_xk_xkPlus1 = x_k_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true);
-            float pTokPlus1 = 1.f; // this is the pdf of going to x_(k+1). need to include in jacobian for hybrid shift only.
-            //if k < d-1, this is just p_bsdf_xk_xkPlus1, but if k = d-1, need to case on bsdf/nee
+            float k_kPlus1_lobe_pdf = x_k_mi.evalLobePdf(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType);
+            //if k < d-1, this is just p_bsdf_xk_xkPlus1 but lobe specific, but if k = d-1, need to case on bsdf/nee
 
             // Find bsdf/nee mis weight if this is k = d-1 path and x_k was not delta.
-            // if delta, pTokPlus1 will get set to p_bsdf. this is correct for hybrid shift bc you shouldnt have a delta x_k and nee sampled k+1 anyway
+            // if delta, k_kPlus1_lobe_pdf will get set to p_bsdf. this is correct for hybrid shift bc you shouldnt have a delta x_k and nee sampled k+1 anyway
             if (srcX.k == srcX.path.getVertexIndex() - 1 && (srcX.rcVertex.sampledLobeType & LobeType::Delta) == 0) {
-                float bsdfPdf = p_bsdf_xk_xkPlus1;
+                float bsdfPdf = x_k_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true);
                 float lightPdf = 0.f;
                 if (srcX.path.sampledEnvMap()) {
                     lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(srcX.rcVertex.outgoingDir);
@@ -528,17 +527,15 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                 //Finally, calc mis weight
                if(srcX.path.isBSDFSampled()){
                    misWeight = bsdfPdf / (bsdfPdf + lightPdf); // impossible to have sampled analytic here
-                   pTokPlus1 = bsdfPdf;
+                   //k_kPlus1_lobe_pdf alr set
                } else if (srcX.path.isNEESampled()) {
                    misWeight = srcX.path.sampledAnalytic() ? 1.f : lightPdf / (lightPdf + bsdfPdf);
-                   pTokPlus1 = lightPdf;
+                   k_kPlus1_lobe_pdf = lightPdf;
                }
-            } else {
-                pTokPlus1 = p_bsdf_xk_xkPlus1;
             }
 
             if (shiftType == ShiftMappingType::Hybrid) {
-                jacobian_num *= pTokPlus1; // finish calculating jacobian for hybrid shift (form: ratio of pdf * G * pdf)
+                jacobian_num *= k_kPlus1_lobe_pdf; // finish calculating jacobian for hybrid shift (form: ratio of pdf * G * pdf)
             }
             
         }

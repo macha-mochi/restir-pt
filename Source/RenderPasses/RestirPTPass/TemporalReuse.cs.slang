@@ -8,25 +8,12 @@ import PathState;
 
 struct DebugData
 {
-    // recon data
-    float3 p_hat_rc;
-    float jacobian_rc;
-
-    // hybrid data
-    float3 p_hat_h;
-    float jacobian_h;
-
-    uint reasonFail;
+    uint dummy;
     float3 replayThp;
 
     __init() {
-        p_hat_h = float3(0.f);
-        p_hat_rc = float3(0.f);
-        jacobian_h = 0.f;
-        jacobian_rc = 0.f;
-
-        reasonFail = 0;
-        replayThp = float3(0.f);
+        replayThp = 0.f;
+        dummy = 0;
     }
 };
 
@@ -131,12 +118,8 @@ struct TemporalReusePass {
             }
         }
         float w_i = (m_num / m_den) * luminance(inputBuffer[ind(pixel)].X.p_hat) * inputBuffer[ind(pixel)].W_X; // jacobian is 1 bc alr in right domain
-        if (isnan(w_i)){
-            w_i = 0.f;
-        }
-        if (r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg)) {
-            outputColor[pixel] = float4(0, 1, 0, 1);
-        }
+        if (isnan(w_i)) w_i = 0.f;
+        r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg);
 
         // Temporal
         if (pixelHasValidTemporalPos) {
@@ -144,6 +127,8 @@ struct TemporalReusePass {
             float jacobian = temporalBuffer[ind(pixelLastFrame)].X.J; // this is the denom of jacobian of shifting last frame's sample into this domain, so this is the forward jacobian
             bool shiftSucceeded = false;
             ShiftDebugData d = {};
+            d.rcThp = float3(-1.f);
+            d.incomingRadiance = float3(-1.f);
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
             {
                 HitInfo dstHit = HitInfo(vBuffer[pixel]);
@@ -181,11 +166,12 @@ struct TemporalReusePass {
 
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
                 w_i = (m_num / m_den) * luminance(X_thisFrame.p_hat) * temporalBuffer[ind(pixelLastFrame)].W_X * jacobian;
-                if (isnan(w_i)) w_i = 0.f;
             }
             // update reservoir streaming (in new buffer)
             X_thisFrame.w_i = w_i;
-            r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg);
+            if(r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg)){
+                //outputColor[pixel] = float4(0, 1, 0, 1);
+            }
         }
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
@@ -194,8 +180,6 @@ struct TemporalReusePass {
         // If this is the last pass, should calculate the output color
             outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
         #endif
-
-        //outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
 
     }
 }

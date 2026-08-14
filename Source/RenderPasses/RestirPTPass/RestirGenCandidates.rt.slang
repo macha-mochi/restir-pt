@@ -122,7 +122,6 @@ struct ShiftContext{
     float primaryRayFootprint; //used for hybrid only
     float jacobian_denom; // only set once rcvertexind is set!
     uint x_kPlus1_seed;
-    float prevRayPdf; // during the loop, if vertex = i, this holds the pdf of the ray from vertex i-1 to vertex i
 
     __init(){
         rcVertexInd = 0;
@@ -130,7 +129,6 @@ struct ShiftContext{
         primaryRayFootprint = 0.f;
         jacobian_denom = 0.f;
         x_kPlus1_seed = 0;
-        prevRayPdf = 0.f;
     }
 }
 
@@ -187,6 +185,7 @@ struct ScatterRayData
 
     float3 p_hat_thp; // Throughput for the p_hat calculations. doesn't include pdf, only bsdf * geo term
     float path_pdf;   ///< Current path pdf (just multiplying) in terms of solid angle (changed from area)
+    float lobe_pdf; ///< Pdf of the path segment leading to current vertex but only for the lobe that was sampled. used for jacobians of hybrid shift
     uint prevSampledLobeType;
     uint sampledLobeType;
 
@@ -214,6 +213,7 @@ struct ScatterRayData
 
         this.p_hat_thp = float3(1, 1, 1);
         this.path_pdf = 1.f;
+        this.lobe_pdf = 0.f;
         this.prevSampledLobeType = 0;
         this.sampledLobeType = 0;
 
@@ -314,6 +314,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         }
         rayData.normal = sd.getOrientedFaceNormal();
         rayData.pdf = bsdfSample.pdf;
+        rayData.lobe_pdf = mi.evalLobePdf(sd, bsdfSample.wo, bsdfSample.lobeType);
         rayData.path.setTransmission(bsdfSample.isLobe(LobeType::Transmission));
         rayData.path.setSpecular(bsdfSample.isLobe(LobeType::Specular));
         rayData.path.setDelta(bsdfSample.isLobe(LobeType::Delta));
@@ -624,6 +625,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     // Save info for hybrid shift mapping
     float3 x_kMinus1 = rayData.origin;
     float kMinus1_to_k_pdf = rayData.pdf;
+    float kMinus1_k_lobe_pdf = rayData.lobe_pdf;
     float3 normalAt_kMinus1 = rayData.normal;
     float kMinus1_roughness = rayData.roughness;
     // Calculate g for jacobian calcs later
@@ -659,8 +661,8 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         }
 
         // also record data for the jacobian denom of the hybrid shift
-        rayData.sampleData.j_denom = kMinus1_k; // p of going from x_(k-1) to x_k * geometry term of doing that.
-        //pdf of going from x_k to x_(k+1) will be multiplied in main path loop since rayDAta.pdf is easily accessible there + we need to handle NEE differently
+        // lobe pdf of going from x_(k-1) to x_k * geometry term of doing that * lobe pdf of x_k to x_(k+1)
+        rayData.sampleData.j_denom = kMinus1_k_lobe_pdf * rayData.sampleData.g * rayData.lobe_pdf;
     } else {
         rayData.sampleData.dualRayFootprint = 0.f;
     }
@@ -825,7 +827,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
                 // jacobian is ratio of cos / distance (aka g term)
                 curNEESample.J = rayData.sampleData.nee_g;
-            } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid){
+            } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
                 // in k = d case, jacobian is ratio of pdf_nee (in solid angle) * g
                 curNEESample.J = rayData.sampleData.nee_pdf * rayData.sampleData.nee_g;
             }
@@ -886,8 +888,12 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                             r.X.J = rayData.sampleData.nee_pdf * rayData.sampleData.nee_g; // this is handled the way the restir enhanced paper says to. p of x_(k-1) to k is just pdf of choosing x_k light vertex, we don't include p of x_k to x_(k+1) bc x_(k+1) doesn't exist
                         } else {
                             r.X.k = shiftContext.rcVertexInd;
-                            r.X.J = shiftContext.jacobian_denom * r.X.rcVertex.outgoingPdf;
-                            // in k = d-1 case: rcVertex.outgoingPdf is just nee_pd in solid angle for p(k to k+1). and in normal k < d case, rcVertex.outgoingPdf is the normal bsdf pdf
+                            r.X.J = shiftContext.jacobian_denom;
+                            if (r.X.k == r.X.path.getVertexIndex() - 1) {
+                                // in k = d-1 case: divide by bsdf lobe specific pdf (canceling it) and multiply by nee_pdf in for p(k to k+1). 
+                                r.X.J *= (rayData.sampleData.nee_pdf / rayData.lobe_pdf);
+                            }
+                           
                         }
                     }
 
@@ -899,7 +905,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
             rayData.sampleData = {};
             rayData.path.clearSampleTechniqueAndLightTypes();
 
-            shiftContext.prevRayPdf = rayData.pdf; // also save previous ray pdf before new scatter ray generated
+            float prevLobePdf = rayData.lobe_pdf; // also save previous lobe specific pdf before new scatter ray generated
             // Trace scatter ray. If it hits geometry, the closest hit shader samples
             // direct illumination and generates the next scatter ray.
             traceScatterRay(rayData);
@@ -964,18 +970,18 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
                     if (shiftContext.rcVertexInd == 0) { // we didn't find an rc vertex
                         r.X.k = rayData.path.getVertexIndex(); //k = d case
-                        if (rayData.path.sampledEnvMap()) {
-                            r.X.J = rayData.pdf; // might be wrong? but we dont have a better way rn bc if its the env map, that doesnst have x(k+1) or a G term
+                        if (rayData.path.isTerminated()) {
+                            r.X.J = rayData.lobe_pdf; // might be wrong? but we dont have a better way rn bc if its the env map, that doesnst have x(k+1) or a G term
                         } else { // but if we hit a triangle, need g term. also can't use rayData.pdf bc thats for ray coming out of xk
-                            r.X.J = shiftContext.prevRayPdf * rayData.sampleData.g;
+                            r.X.J = prevLobePdf * rayData.sampleData.g;
                         }
                     } else {
                         r.X.k = shiftContext.rcVertexInd;
-                        r.X.J = shiftContext.jacobian_denom * r.X.rcVertex.outgoingPdf; //j_denom alr calculated
+                        r.X.J = shiftContext.jacobian_denom; //j_denom alr calculated
                     }
                 }
 
-                if (!rayData.path.sampledEnvMap()) {
+                if (!rayData.path.isTerminated()) {
                     r.X.path.setSampleType(PathFlags::bsdfSampled, PathFlags::sampledEmissive);
                 } //if we did hit the env map, path flags are alr set
 

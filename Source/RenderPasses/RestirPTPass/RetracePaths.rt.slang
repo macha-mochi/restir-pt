@@ -398,39 +398,40 @@ void rayGenSpatial()
     PathViewerPath path = {};
     RandomReplayOutput op = {};
 
+    // Replay outputs from here will be used for when we shift canonical sample into neighbors' domains, for mis_denom of canonical sample.
     for(int i = 0; i < kNumSpatialNeighbors; i++)
     {
         path = {};
         op = {};
-        int2 neighborPixel;
+        int2 neighborPixel = int2(-1);
         if(getSpatialNeighbor(basePixel, i, neighborPixel)) {
             op = tracePath(neighborPixel, frameDim, inputBuffer[basePixelInd], path); //using canonical's seed, from each neighbor.
         }
-        op.sourcePixel = basePixel;
+        op.sourcePixel = neighborPixel;
         outputBuffer[outputBufferInd] = op;
         outputBufferInd++;
     }
 
+    //In each iter of outer loop: 1st shift is shifting neighbor to canonical domain, shifts in inner loop are for shifting the path in canonical domain using neighbor's seed to the other neighbors.
     for (int i = 0; i < kNumSpatialNeighbors; i++) {
         path = {};
         op = {};
-        int2 neighborPixel;
+        int2 neighborPixel = int2(-1);
         if(getSpatialNeighbor(basePixel, i, neighborPixel)) {
             op = tracePath(basePixel, frameDim, inputBuffer[ind(neighborPixel)], path); // using neighbor's seed, from canonical.
-            op.sourcePixel = neighborPixel;
-            outputBuffer[outputBufferInd] = op;
             op.sourcePixel = basePixel;
+            outputBuffer[outputBufferInd] = op;
             outputBufferInd++;
 
             for (int j = 0; j < kNumSpatialNeighbors; j++) {
                 if(i == j) continue; //we didnt leave room in buffer for i == j
                 path = {};
                 op = {};
-                int2 otherNeighbor;
+                int2 otherNeighbor = int2(-1);
                 if (getSpatialNeighbor(basePixel, j, otherNeighbor)) {
                     op = tracePath(otherNeighbor, frameDim, inputBuffer[ind(neighborPixel)], path); // using [neighbor]'s seed, from canonical's OTHER spatial neighbors.
                 }
-                op.sourcePixel = neighborPixel;
+                op.sourcePixel = otherNeighbor;
                 outputBuffer[outputBufferInd] = op;
                 outputBufferInd++;
             }

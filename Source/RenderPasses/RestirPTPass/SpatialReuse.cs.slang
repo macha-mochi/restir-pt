@@ -67,7 +67,8 @@ struct SpatialReusePass {
 
         outputColor[pixel] = float4(0, 0, 0, 1);
 
-        Reservoir r = {}; //copy the input reservoir
+        Reservoir r = {};
+        DebugData debugData = {};
 
         SampleGenerator sg = SampleGenerator(pixel, gFrameCount);
         // Advance the generator to the first available dimension.
@@ -75,8 +76,8 @@ struct SpatialReusePass {
         for (uint i = 0; i < gPRNGDimension; i++)
             sampleNext1D(sg);
 
-        DebugData debugData = {};
-
+        uint replayDataBufferInd = getReplayOutputIndex_S(pixel, gOutputDimensions, kNumSpatialNeighbors);
+        uint ogInd = replayDataBufferInd;
         // Treat input buffer sample as canonical.
         float m_num = inputBuffer[ind(pixel)].c * luminance(inputBuffer[ind(pixel)].X.p_hat); // alr in the correct domain
         float m_den = m_num;
@@ -98,11 +99,22 @@ struct SpatialReusePass {
                         float3(1.f),                         // previous thp = 1
                         Y_neighborDomain, inverse_jacobian, sg, d); // out or inout variables
                 } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid) {
+                    HitInfo dstHit = HitInfo(replayedDataBuffer[replayDataBufferInd].x_kMinus1_hitInfo);
+                    float3 rayOrigin = replayedDataBuffer[replayDataBufferInd].x_kMinus2_pos; //this was calc'd as ray origin in Retrace pass
+                    float3 rayDir = normalize(gScene.getVertexData(dstHit.getTriangleHit()).posW - rayOrigin);
+                    ShadingData y_kMinus1_SD = loadShadingData(dstHit, rayOrigin, rayDir);
+                    success = computeShiftedSample(ShiftMappingType::Hybrid, false, false, // settings for shift: hybrid, no temporal
+                        y_kMinus1_SD,
+                        inputBuffer[ind(pixel)].X, // base path is canonical, while dst hit is replayed from neighbor's domain
+                        replayedDataBuffer[replayDataBufferInd].replayedThp,
+                        Y_neighborDomain, inverse_jacobian, sg, d); // out or inouts
                 }
                 if (success) {
                     m_den += inputBuffer[ind(neighbor)].c * luminance(Y_neighborDomain.p_hat) * inverse_jacobian; // we just did the inverse shift mapping, jacobian = |T(-1)(y)|
                 }
             }
+
+            replayDataBufferInd++;
         }
         float w_i = (m_num / m_den) * luminance(inputBuffer[ind(pixel)].X.p_hat) * inputBuffer[ind(pixel)].W_X; // jacobian is 1 bc alr in right domain
         if (isnan(w_i)) w_i = 0.f;
@@ -111,7 +123,10 @@ struct SpatialReusePass {
         // Spatial passes
         for(int i = 0; i < kNumSpatialNeighbors; i++){
             int2 neighbor = int2(0);
-            if (!getSpatialNeighbor(pixel, i, neighbor)) continue;
+            if (!getSpatialNeighbor(pixel, i, neighbor)) {
+                replayDataBufferInd += kNumSpatialNeighbors;
+                continue;
+            }
 
             Sample neighbor_curDomain = {};
             float w_i = 0.f;
@@ -129,6 +144,17 @@ struct SpatialReusePass {
                     neighbor_curDomain, jacobian, sg, d); // out or inout variables
             } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
             {
+                HitInfo dstHit = HitInfo(replayedDataBuffer[replayDataBufferInd].x_kMinus1_hitInfo);
+                float3 rayOrigin = replayedDataBuffer[replayDataBufferInd].x_kMinus2_pos;
+                float3 rayDir = normalize(gScene.getVertexData(dstHit.getTriangleHit()).posW - rayOrigin);
+                ShadingData y_kMinus1_SD = loadShadingData(dstHit, rayOrigin, rayDir);
+                shiftSucceeded = computeShiftedSample( ShiftMappingType::Hybrid, false, false, // settings: hybrid, no temporal domains
+                    y_kMinus1_SD,
+                    inputBuffer[ind(neighbor)] .X, // base path is neigbor sample, which we are trying to shift into current pixel's domain
+                    replayedDataBuffer[replayDataBufferInd].replayedThp,
+                    neighbor_curDomain, jacobian, sg, d); // out or inout variables
+
+                replayDataBufferInd++; //incremenet this no matter success or failure.
             }
 
             float newJ = 0.f;
@@ -152,7 +178,10 @@ struct SpatialReusePass {
                         d = {};
 
                         int2 otherNeighbor = int2(0);
-                        if (!getSpatialNeighbor(pixel, j, otherNeighbor)) continue;
+                        if (!getSpatialNeighbor(pixel, j, otherNeighbor)) {
+                            replayDataBufferInd++; //even if no neighbor here, need to incr buffer ind
+                            continue;
+                        }
 
                         if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
                         {
@@ -165,6 +194,17 @@ struct SpatialReusePass {
                                 shifted, inverse_jacobian, sg, d); // out or inout variables
                         } else if (kShiftMappingType == (uint)ShiftMappingType::Hybrid)
                         {
+                            HitInfo dstHit = HitInfo(replayedDataBuffer[replayDataBufferInd].x_kMinus1_hitInfo);
+                            float3 rayOrigin = replayedDataBuffer[replayDataBufferInd].x_kMinus2_pos;
+                            float3 rayDir = normalize(gScene.getVertexData(dstHit.getTriangleHit()).posW - rayOrigin);
+                            ShadingData y_kMinus1_SD = loadShadingData(dstHit, rayOrigin, rayDir);
+                            success = computeShiftedSample(ShiftMappingType::Hybrid, false, false, //settings: hybrid, no temporal
+                                y_kMinus1_SD,
+                                neighbor_curDomain, //base path sample is neighbor shifted to cur domain
+                                replayedDataBuffer[replayDataBufferInd].replayedThp,
+                                shifted, inverse_jacobian, sg, d); //out or inout
+
+                            replayDataBufferInd++; //regardless of success or fail
                         }
                         if (success) {
                             m_den += inputBuffer[ind(otherNeighbor)].c * luminance(shifted.p_hat) * inverse_jacobian;
@@ -175,13 +215,12 @@ struct SpatialReusePass {
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
                 w_i = (m_num / m_den) * luminance(neighbor_curDomain.p_hat) * inputBuffer[ind(neighbor)].W_X * jacobian;
                 if (isnan(w_i)) w_i = 0.f;
+            } else {
+                replayDataBufferInd += (kNumSpatialNeighbors - 1); //even if shift failed, need to move replay buffer ind forward
             }
+
             neighbor_curDomain.w_i = w_i;
-            if (r.updateReservoir(neighbor_curDomain, w_i, inputBuffer[ind(neighbor)].c, sg))
-            {
-                debugData.dummy = 2.f;
-                outputColor[pixel] = float4(0, 1, 0, 1);
-            }
+            r.updateReservoir(neighbor_curDomain, w_i, inputBuffer[ind(neighbor)].c, sg);
         }
 
         outputBuffer[ind(pixel)] = r;
