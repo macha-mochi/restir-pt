@@ -137,11 +137,11 @@ interface IMaterialInstance
 
 	/**
 		Intended behavior: if you have a BSDFSample struct with incoming dir [wi], outgoing dir [wo] (randomly sampled),
-		calculated weight [weight], and pdf [pdf], this function should return the equivalent of weight * pdf given a [wo].
+		calculated weight [weight], and pdf [pdf], this function should return the equivalent of weight * pdf (aka just f * cos) given a [wo].
 
 		Used to reconstruct the throughput changes at the rc vertex and the vertex just before that
 
-		Added by me
+		Author: faye
 	*/
     float3 evalBSDF<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeTypes, inout S sg) {
         return { 0.f, 0.f, 0.f };
@@ -173,6 +173,13 @@ interface IMaterialInstance
         \return PDF with respect to solid angle for sampling direction wo (0 for delta events).
     */
     float evalPdf(const ShadingData sd, const float3 wo, bool useImportanceSampling = true);
+
+    /** Evaluates and returns pmf for sampling a given lobe * the pdf of sampling the given direction on that lobe. Only one lobe type at a time! Must use importance sampling.
+        \param[in] sd Shading data.
+        \param[in] wo Outgoing direction.
+        \return PDF with respect to solid angle for sampling direction wo (0 for delta events).
+    */
+    float evalLobePdf(const ShadingData sd, const float3 wo, const uint allowedLobeType);
 
     /** Return BSDF properties.
         \param[in] sd Shading data.

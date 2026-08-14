@@ -72,7 +72,13 @@ struct StandardMaterialInstance : MaterialInstanceBase, IMaterialInstance
         return bsdf.eval(wiLocal, woLocal, sg, BSDFContext());
     }
 
-    //Function added by me for restir
+    /**
+    See declaration of evalBSDF in IMaterialInstance.
+
+    For the standard material, we only support one lobe type. As in, [allowedLobeType] cannot include more than 1 lobe type.
+
+    // Author: faye
+    */
     float3 evalBSDF<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeType, inout S sg) {
         float3 wiLocal = sf.toLocal(sd.V);
         float3 woLocal = sf.toLocal(wo);
@@ -140,6 +146,28 @@ struct StandardMaterialInstance : MaterialInstanceBase, IMaterialInstance
             StandardBSDF bsdf = StandardBSDF(wiLocal, sd.mtl, data);
             return bsdf.evalPdf(wiLocal, woLocal, BSDFContext());
         }
+    }
+
+    // See def in IMaterialInstance. must use importance sampling, since evalPdfReference doesn't support only certain lobes
+    float evalLobePdf(const ShadingData sd, const float3 wo, const uint allowedLobeType)
+    {
+        float3 wiLocal = sf.toLocal(sd.V);
+        float3 woLocal = sf.toLocal(wo);
+
+        if (!isValidHemisphereReflectionOrTransmission(sd, sf, wiLocal, woLocal, wo)) return 0.f;
+
+        StandardBSDF bsdf = StandardBSDF(wiLocal, sd.mtl, data);
+        return bsdf.evalLobePdf(wiLocal, woLocal, allowedLobeType, BSDFContext());
+
+        /*if (!useImportanceSampling)
+        {
+            return evalPdfReference(sd, wiLocal, woLocal);
+        }
+        else
+        {
+            StandardBSDF bsdf = StandardBSDF(wiLocal, sd.mtl, data);
+            return bsdf.evalPdf(wiLocal, woLocal, BSDFContext());
+        }*/
     }
 
     BSDFProperties getProperties(const ShadingData sd)
