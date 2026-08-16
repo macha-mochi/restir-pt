@@ -410,6 +410,15 @@ void RestirPTPass::PathRetracePass(RenderContext* pRenderContext, const RenderDa
     {
         var["temporalInputBuffer"] = mpReplayInputBuffers[mTemporalReplayInputID];
         mpReplayInputBuffers[mTemporalReplayInputID]->setName("Restir Replay Input Buffer - Temporal");
+        if (mpTemporalVBuffer)
+        {
+            var["temporalVBuffer"] = mpTemporalVBuffer;
+        }
+        if (mpTemporalViewDir)
+        {
+            var["temporalViewW"] = mpTemporalViewDir;
+        }
+        var["motionVectors"] = renderData.getTexture(kInputMotionVectors);
     }
     var["outputBuffer"] = mpReplayOutputBuffer;
     var["outputColor"] = renderData.getTexture(kOutputColor);

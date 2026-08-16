@@ -20,22 +20,18 @@ ParameterBlock<EnvMapSampler> envMapSampler; ///< Environment map sampler. Only 
 ParameterBlock<EmissiveLightSampler> emissiveSampler; ///< Emissive light sampler. Only valid when kUseEmissiveLights == true.
 
 struct ShiftDebugData {
-    bool shadowRayVisible;
     uint failReason;
-    uint neeLightType;
     float misWeight;
+    float3 kMinus1_rcThp;
     float3 rcThp;
     float3 incomingRadiance;
-    uint neeSeed;
 
     __init() {
-        shadowRayVisible = false;
         failReason = 0;
-        neeLightType = 4;
         misWeight = 0;
+        kMinus1_rcThp = float3(0.f);
         rcThp = float3(0.f);
         incomingRadiance = float3(0.f);
-        neeSeed = 0;
     }
 }
 
@@ -378,6 +374,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                 rcThp /= ls.pdf; //for PSS
                 jacobian_num = ls.pdf * ls.g;
             }
+            d.misWeight = misWeight;
         } else if(srcX.path.isBSDFSampled()){
             if (srcX.path.sampledEnvMap()) {
                 // trace shadow ray
@@ -399,6 +396,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                     rcThp /= bsdfPdf; //for PSS
                     jacobian_num = y_kMinus1_mi.evalLobePdf(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.prevSampledLobeType); //also not including g bc env map has no valid g
                 }
+                d.misWeight = misWeight;
             } // leave emissive for rcVertex is valid case
         } else {
             return false;
@@ -433,7 +431,6 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             return false; // this shift is not valid if x_k is occluded from y_(k-1)
         }
         rcThp = y_kMinus1_mi.evalBSDF(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType, sg);
-        if (any(isnan(rcThp))) rcThp = float3(0, 0, 0);
 
         float p_ykMinus1_xk = y_kMinus1_mi.evalPdf(y_sd, rcIncomingDir, true);
         if (shiftType == ShiftMappingType::Hybrid) {
@@ -442,8 +439,11 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             jacobian_num = y_kMinus1_mi.evalLobePdf(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType);
 
             // we also divide thp at y(k-1) by the pdf of going y_k-1 to x_k for PSS
+            // if pdf of y_k-1 to xk is 0, say bc its delta, we should get a 0 thp
             rcThp /= p_ykMinus1_xk;
         }
+        if (any(isnan(rcThp))) rcThp = float3(0, 0, 0);
+        d.kMinus1_rcThp = rcThp;
 
         // Now re-eval bsdf at x_k. start by getting sd
         if (temporalDst) {
@@ -489,7 +489,6 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             }
         } else {
             float3 weight2 = x_k_mi.evalBSDF(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType, sg); // bsdf * cos for y2
-            if (any(isnan(weight2))) weight2 = float3(0, 0, 0);
             rcThp *= weight2;
             incomingRadiance = srcX.rcVertex.incomingRadiance;
 
@@ -532,7 +531,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                     misWeight = bsdfPdf / (bsdfPdf + lightPdf); // impossible to have sampled analytic here
                     //k_kPlus1_lobe_pdf, k_kPlus1_pdf alr set
                 } else if (srcX.path.isNEESampled()) {
-                    misWeight = srcX.path.sampledAnalytic() ? 1.f : lightPdf / (lightPdf + bsdfPdf);
+                    misWeight = srcX.path.sampledAnalytic() ? 1.f : (lightPdf / (lightPdf + bsdfPdf));
                     k_kPlus1_lobe_pdf = lightPdf;
                     k_kPlus1_pdf = lightPdf;
                 }
@@ -543,6 +542,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
 
                 rcThp /= k_kPlus1_pdf; // for PSS
             }
+            if (any(isnan(rcThp))) rcThp = float3(0, 0, 0);
             
         }
         rcThp *= misWeight;

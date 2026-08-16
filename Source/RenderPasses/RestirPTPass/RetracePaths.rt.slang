@@ -19,7 +19,10 @@ cbuffer CB
 Texture2D<PackedHitInfo> vBuffer;
 Texture2D<float4> viewW;
 StructuredBuffer<RandomReplayInput> inputBuffer;
+Texture2D<PackedHitInfo> temporalVBuffer;
+Texture2D<float4> temporalViewW;
 StructuredBuffer<RandomReplayInput> temporalInputBuffer;
+Texture2D<float2> motionVectors;
 
 // Outputs
 RWStructuredBuffer<int2> spatialOffsetBuffer;
@@ -165,6 +168,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
 
 /**
  * This is the main entry point for the path retrace (prolly only supports tracing in current frame for now, unless I bind last frame's BVH. TODO might get to it)
+ * If [inLastFrame] true, function assumes [pixel] is valid for indexing into resources related to last frame
  *
  * One path per pixel is generated, which is traced into the scene.
  * The path tracer is written as a for-loop over path segments.
@@ -175,17 +179,14 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
  * @param[in] frameDim Dimension of the frame in pixels.
  * @param[in] seed The random seed to use
  */
-RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomReplayInput replayParams, out PathViewerPath path)
+RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomReplayInput replayParams, out PathViewerPath path, const bool inLastFrame = false)
 {
-    uint pixelInd = pixel.y * frameDim.x + pixel.x;
-    const float3 primaryRayOrigin = gScene.camera.getPosition();
-    const float3 primaryRayDir = -viewW[pixel].xyz;
-
     RandomReplayOutput op = {};
 
-    uint stopVertex = replayParams.k;
-    const HitInfo hit = HitInfo(vBuffer[pixel]);
-
+    const float3 primaryRayOrigin = inLastFrame ? gScene.camera.data.prevPosW : gScene.camera.getPosition();
+    const float3 primaryRayDir = inLastFrame ? -temporalViewW[pixel].xyz : -viewW[pixel].xyz;
+    const HitInfo hit = HitInfo(inLastFrame ? temporalVBuffer[pixel] : vBuffer[pixel]);
+    const uint stopVertex = replayParams.k;
     if (hit.isValid() && stopVertex > 2)
     {
         SampleGenerator sg = SampleGenerator(0);
@@ -331,6 +332,15 @@ uint ind(uint2 pixel){
     return pixel.y * gOutputDimensions.x + pixel.x;
 }
 
+// Finds the pixel position corresponding to the triangle hit by this frame's [pixel], last frame. Returning false if it would be out of bounds
+// intended usage: use [result] to sample a Texture2D holding data from LAST FRAME. ex: sampling last frame's vbuffer for where our CURRENT frame's pixel would have been in the last frame.
+bool calcLastFramePixelPos(uint2 pixel, out int2 result) {
+    float2 inter = (float2)pixel + float2(0.5f);
+    inter += motionVectors[pixel] * gOutputDimensions;
+    result = (int2)inter;
+    return all(result >= 0) && all(result < gOutputDimensions);
+}
+
 //
 // Shader entry point for ray generation shader.
 
@@ -356,7 +366,10 @@ void rayGenTemporal()
     replayedPathBuffer[basePixelInd] = path;
 
     path = {};
-    op = tracePath(basePixel, frameDim, temporalInputBuffer[basePixelInd], path); //TODO this should prolly be pixel last frame's id
+    uint2 pixelLastFrame;
+    if(calcLastFramePixelPos(basePixel, pixelLastFrame)) {
+        op = tracePath(pixelLastFrame, frameDim, temporalInputBuffer[ind(pixelLastFrame)], path, true);
+    }
     op.sourcePixel = basePixel;
     outputBuffer[outputBufferInd+1] = op;
 }

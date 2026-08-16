@@ -92,13 +92,13 @@ private:
     /// Type of shift mapping used
     ShiftMappingType mShiftMappingType = ShiftMappingType::Hybrid;
     /// Whether to do spatial reuse
-    bool mUseSpatialReuse = true;
+    bool mUseSpatialReuse = false;
     /// Number of spatial neighbors per pixel
     uint mNumSpatialNeighbors = 3;
     ///  Radius that spatial neighbors are picked from in a pixel
     uint mSpatialNeighborRadius = 20;
     /// Whether to do temporal reuse
-    bool mUseTemporalReuse = false;
+    bool mUseTemporalReuse = true;
 
     // Runtime data
 

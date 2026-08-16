@@ -82,6 +82,7 @@ struct Reservoir
             updateSample = true;
         }
         W_X = w_sum / luminance(X.p_hat); // if we got to this point, w_i_new is non zero meaning mi, p_hat, and W_X were all nonzero. so not a null sample
+        if (isnan(W_X)) W_X = 0.f;
 
         return updateSample;
     }

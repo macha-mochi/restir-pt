@@ -252,12 +252,6 @@ struct SpatialReusePass {
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
 
-        float4 finalColor = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
-        if (any(finalColor > 10.f)) {
-            finalColor = float4(1, 0, 1, 1);
-        } else {
-            finalColor = float4(0, 0, 0, 1);
-        }
         outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
     }
 }

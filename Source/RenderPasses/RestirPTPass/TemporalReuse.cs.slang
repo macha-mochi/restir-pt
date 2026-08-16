@@ -118,7 +118,9 @@ struct TemporalReusePass {
             }
         }
         float w_i = (m_num / m_den) * luminance(inputBuffer[ind(pixel)].X.p_hat) * inputBuffer[ind(pixel)].W_X; // jacobian is 1 bc alr in right domain
-        if (isnan(w_i)) w_i = 0.f;
+        if (isnan(w_i)) {
+            w_i = 0.f;
+        }
         r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg);
 
         // Temporal
@@ -157,29 +159,6 @@ struct TemporalReusePass {
                 debugData.replayThp = replayedDataBuffer[replayInd].replayedThp;
             }
 
-            if (!shiftSucceeded) {
-
-                float4 color = float4(0, 0, 0, 1);
-                if (d.failReason == 1) {
-                    // rc vertex invalid (no)
-                    color = float4(1, 1, 0, 1);
-                } else if (d.failReason == 2) {
-                    // other hit type (no)
-                    color = float4(0, 1, 1, 1);
-                } else if (d.failReason == 3) {
-                    // shadow ray k-1 to k not visible
-                     color = float4(1, 0, 1, 1);
-                } else if (d.failReason == 4) {
-                    // jacobian 0 or p hat 0 (no)
-                     //color = float4(0, 0, 1, 1);
-                } else {
-                    if (temporalBuffer[ind(pixelLastFrame)].X.k != temporalBuffer[ind(pixelLastFrame)].X.path.getVertexIndex()) {
-                        color = float4(1, 0, 0, 1);
-                    }
-                }
-                outputColor[pixel] = color;
-            }
-
             float w_i = 0.f;
             if (shiftSucceeded) {
                 float m_num = temporalBuffer[ind(pixelLastFrame)].c * luminance(temporalBuffer[ind(pixelLastFrame)].X.p_hat) / jacobian;
@@ -190,11 +169,7 @@ struct TemporalReusePass {
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
                 w_i = (m_num / m_den) * luminance(X_thisFrame.p_hat) * temporalBuffer[ind(pixelLastFrame)].W_X * jacobian;
             }
-            // update reservoir streaming (in new buffer)
-            X_thisFrame.w_i = w_i;
-            if(r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg)){
-                //outputColor[pixel] = float4(0, 1, 0, 1);
-            }
+            r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg);
         }
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
