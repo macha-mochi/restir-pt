@@ -157,6 +157,29 @@ struct TemporalReusePass {
                 debugData.replayThp = replayedDataBuffer[replayInd].replayedThp;
             }
 
+            if (!shiftSucceeded) {
+
+                float4 color = float4(0, 0, 0, 1);
+                if (d.failReason == 1) {
+                    // rc vertex invalid (no)
+                    color = float4(1, 1, 0, 1);
+                } else if (d.failReason == 2) {
+                    // other hit type (no)
+                    color = float4(0, 1, 1, 1);
+                } else if (d.failReason == 3) {
+                    // shadow ray k-1 to k not visible
+                     color = float4(1, 0, 1, 1);
+                } else if (d.failReason == 4) {
+                    // jacobian 0 or p hat 0 (no)
+                     //color = float4(0, 0, 1, 1);
+                } else {
+                    if (temporalBuffer[ind(pixelLastFrame)].X.k != temporalBuffer[ind(pixelLastFrame)].X.path.getVertexIndex()) {
+                        color = float4(1, 0, 0, 1);
+                    }
+                }
+                outputColor[pixel] = color;
+            }
+
             float w_i = 0.f;
             if (shiftSucceeded) {
                 float m_num = temporalBuffer[ind(pixelLastFrame)].c * luminance(temporalBuffer[ind(pixelLastFrame)].X.p_hat) / jacobian;

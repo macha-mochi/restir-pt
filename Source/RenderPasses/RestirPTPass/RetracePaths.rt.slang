@@ -35,7 +35,7 @@ static const float kHybridShiftRoughnessThreshold = 0.2f; // got this value from
 struct ScatterRayData
 {
     PathState path;
-    float3 thp;       ///< The replayed thp
+    float3 thp;       ///< The replayed thp, in PSS parametrization (product of "f/p" terms)
     float3 origin;    ///< Next path segment origin.
     float3 direction; ///< Next path segment direction.
     float3 normal;    ///< Shading normal at origin. Used for light sampling and MIS weight calculations.
@@ -108,9 +108,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, float3
         // bsdfsample.weight = f * dot(wo, n) / pdf
         // wo is normalized in world space
         rayData.thp *= bsdfSample.weight;
-        if (!bsdfSample.isLobe(LobeType::Delta)) { //nondelta
-            rayData.thp *= bsdfSample.pdf;
-        }
+
         return any(rayData.thp > 0.f);
     }
 

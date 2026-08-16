@@ -183,8 +183,8 @@ struct ScatterRayData
     float pdf; ///< Pdf of last path segment (the one leading to the current vertex). This is needed for MIS weight calculations at the current vertex for the bsdf
     float roughness;  ///< Roughness at origin, used for thresholding for hybrid shift
 
-    float3 p_hat_thp; // Throughput for the p_hat calculations. doesn't include pdf, only bsdf * geo term
-    float path_pdf;   ///< Current path pdf (just multiplying) in terms of solid angle (changed from area)
+    float3 p_hat_thp; // Throughput for the p_hat calculations. For reconnection: doesn't include pdf, only bsdf * geo term. For hybrid: does include divided pdf.
+    float path_pdf;   ///< Current path pdf (just multiplying) in terms of solid angle (changed from area), if using reconnection. If using hybrid, will be 1.0
     float lobe_pdf; ///< Pdf of the path segment leading to current vertex but only for the lobe that was sampled. used for jacobians of hybrid shift
     uint prevSampledLobeType;
     uint sampledLobeType;
@@ -212,7 +212,7 @@ struct ScatterRayData
         this.roughness = 0.f;
 
         this.p_hat_thp = float3(1, 1, 1);
-        this.path_pdf = 1.f;
+        this.path_pdf = 1.f; //this must be 1 for hybrid shift
         this.lobe_pdf = 0.f;
         this.prevSampledLobeType = 0;
         this.sampledLobeType = 0;
@@ -324,7 +324,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         // bsdfsample.weight = f * dot(wo, n) / pdf
         // wo is normalized in world space
         rayData.p_hat_thp *= bsdfSample.weight;
-        if (rayData.path.nonDelta()) {
+        if (kShiftMappingType == (uint)ShiftMappingType::Reconnection && rayData.path.nonDelta()) { //only cancel out divided pdf in weight and update path_pdf if using RC shift
             rayData.p_hat_thp *= bsdfSample.pdf;
             rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
         }
@@ -707,8 +707,6 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                 bool visible = traceShadowRay(ls.origin, ls.dir, ls.distance);
                 if (visible)
                 {
-                    float3 nee_p_hat = rayData.p_hat_thp * Lr * ls.pdf; // since Li was already divided by pdf, we undivide to get the realization of f for this NEE sample
-                    float change_in_pdf = ls.pdf;
                     /*if (ls.lightType == (uint)NEELightType::Emissive || ls.lightType == (uint)NEELightType::Analytic) //this code is for parametrizing path in area measure
                     {
                         // for emissive, need to convert pdf from solid angle to area by multiplying by g. also multiply nee_p_hat by g.
@@ -717,8 +715,16 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                         //change_in_pdf *= ls.g;
                     } // for env map, don't need to convert since it stays in solid angle */
 
+                    float3 nee_p_hat = rayData.p_hat_thp * Lr;
+                    float change_in_path_pdf = 1.f;
+                    if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
+                        // using solid angle parametrization so we just want f. since Li was already divided by pdf, we undivide to get the realization of f for this NEE sample
+                        nee_p_hat *= ls.pdf;
+                        change_in_path_pdf = ls.pdf;
+                    }
+
                     rayData.sampleData.nee_p_hat = nee_p_hat;
-                    rayData.sampleData.nee_w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf * change_in_pdf);
+                    rayData.sampleData.nee_w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf * change_in_path_pdf); //if hybrid, both path_pdf and change_in_path_pdf will be 1
                     //store the following data for the main path tracing loop
                     rayData.sampleData.nee_wo = ls.dir;
                     rayData.sampleData.nee_Li = ls.Li * ls.pdf; // bc Li was predivided by pdf

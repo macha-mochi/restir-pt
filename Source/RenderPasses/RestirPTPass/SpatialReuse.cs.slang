@@ -157,6 +157,32 @@ struct SpatialReusePass {
                 replayDataBufferInd++; //incremenet this no matter success or failure.
             }
 
+            if(i == 0){
+                if (!shiftSucceeded) {
+
+                    float4 color = float4(0, 0, 0, 1);
+                    if(d.failReason == 1){
+                        //rc vertex invalid (no)
+                        color = float4(1, 1, 0, 1);
+                    } else if(d.failReason == 2){
+                        // other hit type (no)
+                        color = float4(0, 1, 1, 1);
+                    } else if(d.failReason == 3){
+                        // shadow ray k-1 to k not visible
+                        color = float4(1, 0, 1, 1);
+                    } else if(d.failReason == 4){
+                        // jacobian 0 or p hat 0 (no)
+                        // color = float4(0, 0, 1, 1);
+                    } else {
+                        if (inputBuffer[ind(neighbor)].X.k != inputBuffer[ind(neighbor)].X.path.getVertexIndex()) {
+                            color = float4(1, 0, 0, 1);
+                        }
+                        
+                    }
+                    outputColor[pixel] = color;
+                }
+            }
+
             float newJ = 0.f;
             if (shiftSucceeded) {
                 newJ = jacobian * inputBuffer[ind(neighbor)].X.J;
@@ -226,6 +252,12 @@ struct SpatialReusePass {
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
 
+        float4 finalColor = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
+        if (any(finalColor > 10.f)) {
+            finalColor = float4(1, 0, 1, 1);
+        } else {
+            finalColor = float4(0, 0, 0, 1);
+        }
         outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
     }
 }
