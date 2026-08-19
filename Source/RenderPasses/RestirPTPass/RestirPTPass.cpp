@@ -92,6 +92,8 @@ RestirPTPass::RestirPTPass(ref<Device> pDevice, const Properties& props) : Rende
 
     mReplayInputID = 0;
     mTemporalReplayInputID = 1;
+
+    mpPixelDebug = std::make_unique<PixelDebug>(pDevice);
 }
 
 void RestirPTPass::parseProperties(const Properties& props)
@@ -159,6 +161,8 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         return;
     }
 
+    mpPixelDebug->beginFrame(pRenderContext, targetDim);
+
     // PATH VIEWER DEBUG COMPUTE PASS
     if (mUsePathViewer)
     {
@@ -195,79 +199,7 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     }
     prepareResources(pRenderContext, renderData);
 
-    // Specialize program.
-    // These defines should not modify the program vars. Do not trigger program vars re-creation.
-    mTracer.pProgram->addDefine("MAX_BOUNCES", std::to_string(mMaxBounces));
-    mTracer.pProgram->addDefine("COMPUTE_DIRECT", mComputeDirect ? "1" : "0");
-    mTracer.pProgram->addDefine("USE_IMPORTANCE_SAMPLING", mUseImportanceSampling ? "1" : "0");
-    mTracer.pProgram->addDefine("USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0");
-    mTracer.pProgram->addDefine("USE_EMISSIVE_LIGHTS", mpScene->useEmissiveLights() ? "1" : "0");
-    mTracer.pProgram->addDefine("USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0");
-    mTracer.pProgram->addDefine("USE_ENV_BACKGROUND", mpScene->useEnvBackground() ? "1" : "0");
-    mTracer.pProgram->addDefines(mpSampleGenerator->getDefines());
-    if (mpEmissiveSampler)
-    {
-        mTracer.pProgram->addDefines(mpEmissiveSampler->getDefines());
-    }
-    mTracer.pProgram->addDefine("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
-    mTracer.pProgram->addDefine("IS_LAST_PASS", !mUseSpatialReuse && !mUseTemporalReuse ? "1" : "0");
-
-    // For optional I/O resources, set 'is_valid_<name>' defines to inform the program of which ones it can access.
-    // TODO: This should be moved to a more general mechanism using Slang.
-    mTracer.pProgram->addDefines(getValidResourceDefines(kInputChannels, renderData));
-    mTracer.pProgram->addDefines(getValidResourceDefines(kOutputChannels, renderData)); //it doesn't need this bc the tracer is not the one outputting final color
-
-    // Prepare program vars (for mTracer). This may trigger shader compilation.
-    // The program should have all necessary defines set at this point.
-    if (!mTracer.pVars)
-        prepareVars();
-    FALCOR_ASSERT(mTracer.pVars);
-
-    // Set constants.
-    auto var = mTracer.pVars->getRootVar();
-    var["CB"]["gFrameCount"] = mFrameCount;
-    var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
-
-    if (mpEmissiveSampler)
-    {
-        // TODO: Do we have to bind this every frame?
-        mpEmissiveSampler->bindShaderData(var["emissiveSampler"]);
-    }
-    if (mpEnvMapSampler)
-    {
-        // TODO: Do we have to bind this every frame?
-        mpEnvMapSampler->bindShaderData(var["envMapSampler"]);
-    }
-
-    auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
-    {
-        if (!desc.texname.empty())
-        {
-            var[desc.texname] = renderData.getTexture(desc.name);
-        }
-    };
-    // Bind I/O buffers. These needs to be done per-frame as the buffers may change anytime.
-    for (auto channel : kInputChannels)
-        bind(var, channel);
-    for (auto channel : kOutputChannels)
-        bind(var, channel);
-
-    var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];
-    mpReservoirBuffers[mOutputReservoirID]->setName("Restir Candidate Output Buffer");
-    var["gDI_BGBuffer"] = mpDiBgBuffer;
-    var["gReplayInputBuffer"] = mpReplayInputBuffers[mReplayInputID]; //this will be written to in this pass, and read from in replay
-    var["gPathViewerPathBuffer"] = mpPathDataBuffer;
-
-    uint elementCount = targetDim.x * targetDim.y;
-    if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
-    {
-        mpCandidateGenDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
-        mpCandidateGenDebugBuffer->setName("Restir Candidate Debug Buffer");
-        var["debugBuffer"] = mpCandidateGenDebugBuffer;
-    }
-
-    // Spawn the rays.
-    mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
+    GenerateInitialCandidates(pRenderContext, renderData);
     
     //Update reseroir IDs for upcoming reuse
     std::swap(mInputReservoirID, mOutputReservoirID);
@@ -307,7 +239,88 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     std::swap(mInputReservoirID, mTemporalReservoirID);
     std::swap(mReplayInputID, mTemporalReplayInputID);
 
+    mpPixelDebug->endFrame(pRenderContext);
+
     mFrameCount++;
+}
+
+void RestirPTPass::GenerateInitialCandidates(RenderContext* pRenderContext, const RenderData& renderData)
+{
+    // Specialize program.
+    // These defines should not modify the program vars. Do not trigger program vars re-creation.
+    mTracer.pProgram->addDefine("MAX_BOUNCES", std::to_string(mMaxBounces));
+    mTracer.pProgram->addDefine("COMPUTE_DIRECT", mComputeDirect ? "1" : "0");
+    mTracer.pProgram->addDefine("USE_IMPORTANCE_SAMPLING", mUseImportanceSampling ? "1" : "0");
+    mTracer.pProgram->addDefine("USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0");
+    mTracer.pProgram->addDefine("USE_EMISSIVE_LIGHTS", mpScene->useEmissiveLights() ? "1" : "0");
+    mTracer.pProgram->addDefine("USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0");
+    mTracer.pProgram->addDefine("USE_ENV_BACKGROUND", mpScene->useEnvBackground() ? "1" : "0");
+    mTracer.pProgram->addDefines(mpSampleGenerator->getDefines());
+    if (mpEmissiveSampler)
+    {
+        mTracer.pProgram->addDefines(mpEmissiveSampler->getDefines());
+    }
+    mTracer.pProgram->addDefine("SHIFT_MAPPING_TYPE", std::to_string((uint32_t)mShiftMappingType));
+    mTracer.pProgram->addDefine("IS_LAST_PASS", !mUseSpatialReuse && !mUseTemporalReuse ? "1" : "0");
+
+    // For optional I/O resources, set 'is_valid_<name>' defines to inform the program of which ones it can access.
+    // TODO: This should be moved to a more general mechanism using Slang.
+    mTracer.pProgram->addDefines(getValidResourceDefines(kInputChannels, renderData));
+    mTracer.pProgram->addDefines(getValidResourceDefines(kOutputChannels, renderData)); // it doesn't need this bc the tracer is not the one
+                                                                                        // outputting final color
+
+    // Prepare program vars (for mTracer). This may trigger shader compilation.
+    // The program should have all necessary defines set at this point.
+    if (!mTracer.pVars)
+        prepareVars();
+    FALCOR_ASSERT(mTracer.pVars);
+
+    // Set constants.
+    auto var = mTracer.pVars->getRootVar();
+    var["CB"]["gFrameCount"] = mFrameCount;
+    auto& dict = renderData.getDictionary();
+    var["CB"]["gPRNGDimension"] = dict.keyExists(kRenderPassPRNGDimension) ? dict[kRenderPassPRNGDimension] : 0u;
+
+    if (mpEmissiveSampler)
+    {
+        // TODO: Do we have to bind this every frame?
+        mpEmissiveSampler->bindShaderData(var["emissiveSampler"]);
+    }
+    if (mpEnvMapSampler)
+    {
+        // TODO: Do we have to bind this every frame?
+        mpEnvMapSampler->bindShaderData(var["envMapSampler"]);
+    }
+
+    auto bind = [&](const ShaderVar& var, const ChannelDesc& desc)
+    {
+        if (!desc.texname.empty())
+        {
+            var[desc.texname] = renderData.getTexture(desc.name);
+        }
+    };
+    // Bind I/O buffers. These needs to be done per-frame as the buffers may change anytime.
+    for (auto channel : kInputChannels)
+        bind(var, channel);
+    for (auto channel : kOutputChannels)
+        bind(var, channel);
+
+    var["gReservoirBuffer"] = mpReservoirBuffers[mOutputReservoirID];
+    mpReservoirBuffers[mOutputReservoirID]->setName("Restir Candidate Output Buffer");
+    var["gDI_BGBuffer"] = mpDiBgBuffer;
+    var["gReplayInputBuffer"] = mpReplayInputBuffers[mReplayInputID]; // this will be written to in this pass, and read from in replay
+    var["gPathViewerPathBuffer"] = mpPathDataBuffer;
+
+    uint elementCount = targetDim.x * targetDim.y;
+    if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
+    {
+        mpCandidateGenDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
+        mpCandidateGenDebugBuffer->setName("Restir Candidate Debug Buffer");
+        var["debugBuffer"] = mpCandidateGenDebugBuffer;
+    }
+
+    mpPixelDebug->prepareProgram(mTracer.pProgram, var);
+    mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
 }
 
 /** Last param: index of the buffer whose samples you want to view debug colors for
@@ -425,6 +438,7 @@ void RestirPTPass::PathRetracePass(RenderContext* pRenderContext, const RenderDa
     var["spatialOffsetBuffer"] = mpSpatialOffsetBuffer;
     var["replayedPathBuffer"] = mpReplayPathDataBuffer; //fill w replayed vertices for the path viewer
 
+    mpPixelDebug->prepareProgram(mReplayTracer.pProgram, var);
     mpScene->raytrace(pRenderContext, mReplayTracer.pProgram.get(), pVars, uint3(targetDim, 1));
 }
 
@@ -526,6 +540,7 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     }
     mpScene->bindShaderData(var["gScene"]); // binds the Scene parameter block (as seen in Scene.slang w all the vertex and geometry buffers
 
+    mpPixelDebug->prepareProgram(program, var);
     pPass->execute(pRenderContext, targetDim.x, targetDim.y);
 }
 
@@ -584,6 +599,8 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
 }
 
 void RestirPTPass::renderUI(Gui::Widgets& widget) {
+    mpPixelDebug->renderUI(widget);
+
     bool dirty = false;
 
     dirty |= widget.var("Max bounces", mMaxBounces, 0u, 1u << 16);
@@ -626,6 +643,8 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
 
 bool RestirPTPass::onMouseEvent(const MouseEvent& mouseEvent)
 {
+    mpPixelDebug->onMouseEvent(mouseEvent);
+
     if (mouseEvent.type == MouseEvent::Type::ButtonDown)
     {
         float2 mousePos = (mouseEvent.pos) * float2(1920, 1080);
@@ -636,8 +655,9 @@ bool RestirPTPass::onMouseEvent(const MouseEvent& mouseEvent)
     }
     if (mUsePathViewer)
     {
-        return true; //don't want the camera to move
+        return true; //don't want the camera to move, but i think this is broken TODO
     }
+    
     return false;
 }
 

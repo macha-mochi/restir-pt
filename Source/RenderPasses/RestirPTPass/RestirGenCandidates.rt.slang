@@ -56,6 +56,7 @@ import Rendering.Lights.LightHelpers;
 import RestirReservoir;
 import RestirHelpers;
 import PathState;
+import Utils.Debug.PixelDebug;
 
 cbuffer CB
 {
@@ -1236,6 +1237,9 @@ void rayGen()
 // we calculate the final color here
     outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
     #endif
+
+    printSetPixel(pixel);
+    print("hi %d", 1);
 }
 
 /**

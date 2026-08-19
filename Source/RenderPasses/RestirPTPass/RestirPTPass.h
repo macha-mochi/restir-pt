@@ -31,6 +31,7 @@
 #include "Utils/Sampling/SampleGenerator.h"
 #include "Rendering/Lights/EnvMapSampler.h"
 #include "Rendering/Lights/EmissiveLightSampler.h"
+#include "Utils/Debug/PixelDebug.h"
 
 #include "RestirTypes.slangh"
 
@@ -69,6 +70,7 @@ private:
     bool prepareLighting(RenderContext* pRenderContext);
     void prepareResources(RenderContext* pRenderContext, const RenderData& renderData);
     void PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData, bool alsoViewReplayPaths);
+    void GenerateInitialCandidates(RenderContext* pRenderContext, const RenderData& renderData);
     void PathRetracePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
     void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
     void GenSpatialOffsetsPass(RenderContext* pRenderContext, const RenderData& renderData);
@@ -80,6 +82,7 @@ private:
     ref<SampleGenerator> mpSampleGenerator; /// GPU sample generator.
     std::unique_ptr<EnvMapSampler> mpEnvMapSampler;          ///< Environment map sampler or nullptr if not used.
     std::unique_ptr<EmissiveLightSampler> mpEmissiveSampler; ///< Emissive light sampler or nullptr if not used.
+    std::unique_ptr<PixelDebug> mpPixelDebug; ///< Pixel Debug utility.
 
     // Configuration
 

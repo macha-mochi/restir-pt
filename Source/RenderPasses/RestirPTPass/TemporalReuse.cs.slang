@@ -5,6 +5,7 @@ import Utils.Math.MathHelpers;
 import Utils.Sampling.SampleGenerator;
 import Scene.Raytracing;
 import PathState;
+import Utils.Debug.PixelDebug;
 
 struct DebugData
 {

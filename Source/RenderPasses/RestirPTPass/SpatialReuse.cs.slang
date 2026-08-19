@@ -4,6 +4,7 @@ import ShiftMapping;
 import Utils.Math.MathHelpers;
 import Utils.Sampling.SampleGenerator;
 import Scene.Raytracing;
+import Utils.Debug.PixelDebug;
 
 struct DebugData
 {

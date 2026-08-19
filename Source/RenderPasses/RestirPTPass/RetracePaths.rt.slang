@@ -8,6 +8,7 @@ import Utils.Geometry.GeometryHelpers;
 import Utils.Sampling.SampleGenerator;
 import PathState;
 import RestirHelpers;
+import Utils.Debug.PixelDebug;
 
 cbuffer CB
 {
