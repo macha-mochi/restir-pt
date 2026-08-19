@@ -183,7 +183,7 @@ struct ScatterRayData
     float pdf; ///< Pdf of last path segment (the one leading to the current vertex). This is needed for MIS weight calculations at the current vertex for the bsdf
     float roughness;  ///< Roughness at origin, used for thresholding for hybrid shift
 
-    float3 p_hat_thp; // Throughput for the p_hat calculations. For reconnection: doesn't include pdf, only bsdf * geo term. For hybrid: does include divided pdf.
+    float3 p_hat_thp; // Throughput for the p_hat calculations. For reconnection: doesn't include pdf, only bsdf * geo term. For hybrid: does include divided pdf, and is in PSS.
     float path_pdf;   ///< Current path pdf (just multiplying) in terms of solid angle (changed from area), if using reconnection. If using hybrid, will be 1.0
     float lobe_pdf; ///< Pdf of the path segment leading to current vertex but only for the lobe that was sampled. used for jacobians of hybrid shift
     uint prevSampledLobeType;
@@ -321,12 +321,42 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         rayData.direction = bsdfSample.wo;
         rayData.roughness = mi.getProperties(sd).roughness;
 
-        // bsdfsample.weight = f * dot(wo, n) / pdf
-        // wo is normalized in world space
-        rayData.p_hat_thp *= bsdfSample.weight;
-        if (kShiftMappingType == (uint)ShiftMappingType::Reconnection && rayData.path.nonDelta()) { //only cancel out divided pdf in weight and update path_pdf if using RC shift
-            rayData.p_hat_thp *= bsdfSample.pdf;
-            rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
+        if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) { // only cancel out divided pdf in weight and update path_pdf if using RC shift
+            // bsdfsample.weight = f * dot(wo, n) / pdf
+            // wo is normalized in world space
+            rayData.p_hat_thp *= bsdfSample.weight;
+            if (rayData.path.nonDelta()) {
+                rayData.p_hat_thp *= bsdfSample.pdf;
+                rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
+            }
+        } else { // HYBRID SHIFT
+
+            uint numLobeTypes = 0;
+            if (bsdfSample.isLobe(LobeType::DiffuseReflection)) {
+                numLobeTypes++;
+            }
+            if (bsdfSample.isLobe(LobeType::DiffuseTransmission)) {
+                numLobeTypes++;
+            }
+            if (bsdfSample.isLobe(LobeType::SpecularReflection)) {
+                numLobeTypes++;
+            }
+            if(bsdfSample.isLobe(LobeType::SpecularTransmission)) {
+                numLobeTypes++;
+            }
+            if (numLobeTypes > 1) {
+
+                //printf("Num lobe types > 1");
+            }
+            float3 fOverP;
+            if(bsdfSample.isLobe(LobeType::Delta)) {
+                //evalLobe will return 0, we need to use the sample weight
+                fOverP = bsdfSample.weight;
+            } else {
+                fOverP = mi.evalLobe(sd, bsdfSample.wo, bsdfSample.lobeType, rayData.sgScatterRays); // use the seed you'll replay later
+                fOverP /= mi.evalLobePdf(sd, bsdfSample.wo, bsdfSample.lobeType);
+            }
+            rayData.p_hat_thp *= fOverP;
         }
         rayData.sampledLobeType = bsdfSample.lobeType;
 
@@ -607,16 +637,21 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         }
     }
     // update curBSDFSample, which alr contains rc info from genScatterRay
-    rayData.sampleData.bsdf_p_hat = bsdf_p_hat;
-    rayData.sampleData.bsdf_w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf;
-
+    if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
+        rayData.sampleData.bsdf_p_hat = bsdf_p_hat;
+        rayData.sampleData.bsdf_w_i = misWeight * luminance(rayData.sampleData.bsdf_p_hat) / rayData.path_pdf;
+    } else { // hybrid, use PSS
+        rayData.sampleData.bsdf_p_hat = misWeight * bsdf_p_hat;
+        rayData.sampleData.bsdf_w_i = luminance(rayData.sampleData.bsdf_p_hat); //path pdf is 1 so we dont divide
+    }
+    
     // Check whether to terminate based on max depth.
     if (rayData.path.getVertexIndex() - 2 >= kMaxBounces)
     {
         rayData.path.terminate();
         return;
     }
-
+    
     // Update things for NEE, or if we don't end up doing it bc our path ends
     rayData.path.setLightSampled(false, false);
     // This should be where you add NEE. but if we're processing kth hit rn, this NEE is for the (k+1)th vertex to be on a light.
@@ -712,19 +747,19 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
                         // for emissive, need to convert pdf from solid angle to area by multiplying by g. also multiply nee_p_hat by g.
                         //for analytic, only certain types will need to be converted to solid angle. for the others, g will be set to 1
                         //nee_p_hat *= ls.g;
-                        //change_in_pdf *= ls.g;
+                        //change_in_pdf *= ls.g; // chanege_in_pdf originally ls.pdf
                     } // for env map, don't need to convert since it stays in solid angle */
 
                     float3 nee_p_hat = rayData.p_hat_thp * Lr;
-                    float change_in_path_pdf = 1.f;
                     if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
                         // using solid angle parametrization so we just want f. since Li was already divided by pdf, we undivide to get the realization of f for this NEE sample
-                        nee_p_hat *= ls.pdf;
-                        change_in_path_pdf = ls.pdf;
+                        rayData.sampleData.nee_p_hat = nee_p_hat * ls.pdf;
+                        rayData.sampleData.nee_w_i = misWeight * luminance(rayData.sampleData.nee_p_hat) / (rayData.path_pdf * ls.pdf); // if hybrid, both path_pdf and change_in_path_pdf will be 1
+                    } else { // hybrid
+                        rayData.sampleData.nee_p_hat = misWeight * nee_p_hat;
+                        rayData.sampleData.nee_w_i = luminance(rayData.sampleData.nee_p_hat); // if hybrid, we use PSS so path_pdf is 1
                     }
 
-                    rayData.sampleData.nee_p_hat = nee_p_hat;
-                    rayData.sampleData.nee_w_i = misWeight * luminance(nee_p_hat) / (rayData.path_pdf * change_in_path_pdf); //if hybrid, both path_pdf and change_in_path_pdf will be 1
                     //store the following data for the main path tracing loop
                     rayData.sampleData.nee_wo = ls.dir;
                     rayData.sampleData.nee_Li = ls.Li * ls.pdf; // bc Li was predivided by pdf
@@ -1048,8 +1083,13 @@ void scatterMiss(inout ScatterRayData rayData)
             // Note we can assume rayData.pdf > 0.f since we shouldn't have got here otherwise. it holds the pdf that the bsdf sampler chose this dir
             misWeight = evalMIS(1, rayData.pdf, 1, lightPdf); // both of these r in solid angle
         }
-        rayData.sampleData.bsdf_p_hat = bsdf_p_hat;
-        rayData.sampleData.bsdf_w_i = misWeight * luminance(bsdf_p_hat) / rayData.path_pdf;
+        if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
+            rayData.sampleData.bsdf_p_hat = bsdf_p_hat;
+            rayData.sampleData.bsdf_w_i = misWeight * luminance(rayData.sampleData.bsdf_p_hat) / rayData.path_pdf;
+        } else { ///hybrid, use PSS where path pdf is 1
+            rayData.sampleData.bsdf_p_hat = misWeight * bsdf_p_hat;
+            rayData.sampleData.bsdf_w_i = luminance(rayData.sampleData.bsdf_p_hat);
+        }
     } else {
         rayData.sampleData.bsdf_p_hat = { 0.f, 0.f, 0.f };
         rayData.sampleData.bsdf_w_i = 0.f;
@@ -1193,8 +1233,8 @@ void rayGen()
     gReservoirBuffer[pixelInd] = r;
 
     #if IS_LAST_PASS
-        // we calculate the final color here
-        outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
+// we calculate the final color here
+    outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
     #endif
 }
 

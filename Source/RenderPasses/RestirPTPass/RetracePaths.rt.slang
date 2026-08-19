@@ -110,7 +110,11 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, float3
 
         // bsdfsample.weight = f * dot(wo, n) / pdf
         // wo is normalized in world space
-        rayData.thp *= bsdfSample.weight;
+        float3 fOverP = mi.evalLobe(sd, bsdfSample.wo, bsdfSample.lobeType, rayData.sg);
+        if ((bsdfSample.lobeType & (uint)LobeType::NonDelta) != 0) {
+            fOverP /= mi.evalLobePdf(sd, bsdfSample.wo, bsdfSample.lobeType);
+        }
+        rayData.thp *= fOverP;
 
         return any(rayData.thp > 0.f);
     }
@@ -179,7 +183,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
  * @param[in] frameDim Dimension of the frame in pixels.
  * @param[in] seed The random seed to use
  */
-RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomReplayInput replayParams, out PathViewerPath path, const bool inLastFrame = false)
+RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomReplayInput replayParams, inout PathViewerPath path, const bool inLastFrame = false)
 {
     RandomReplayOutput op = {};
 
@@ -218,7 +222,7 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
         {
             // Vertex dependent things
             if (vertex == stopVertex - 1) { //we are about to hit x_k-1 
-                op.replayedThp = rayData .thp; // thp right now is what we want, having just hit x_k-2. Store the info carried by rayData
+                op.replayedThp = rayData.thp; // thp right now is what we want, having just hit x_k-2. Store the info carried by rayData
                 op.x_kMinus2_pos = rayData.origin;
                 rayData.shouldScatter = false; // we don't want to generate a scatter ray from x_(k-1) bc it's unneeded work
             }
@@ -355,23 +359,29 @@ void rayGenTemporal()
     uint basePixelInd = ind(basePixel);
     uint outputBufferInd = getReplayOutputIndex_T(basePixel, frameDim);
 
+    int2 pixelLastFrame;
+    bool pixelValidLastFrame = calcLastFramePixelPos(basePixel, pixelLastFrame);
+
     // prev thps needed:
     // canonical -> last frame for mis (NOTE: this is just tracing in current frame's bvh with current vbuffer. is wrong for scenes w motion)
     // last frame -> this frame for reservoir update
 
     PathViewerPath path = {};
-    RandomReplayOutput op = tracePath(basePixel, frameDim, inputBuffer[basePixelInd], path);
-    op.sourcePixel = basePixel;
-    outputBuffer[outputBufferInd] = op;
-    replayedPathBuffer[basePixelInd] = path;
-
-    path = {};
-    uint2 pixelLastFrame;
-    if(calcLastFramePixelPos(basePixel, pixelLastFrame)) {
-        op = tracePath(pixelLastFrame, frameDim, temporalInputBuffer[ind(pixelLastFrame)], path, true);
+    RandomReplayOutput op = {};
+    if (pixelValidLastFrame) {
+        op = tracePath(pixelLastFrame, frameDim, inputBuffer[basePixelInd], path, true); // replay should occur in last frame, but use this frame's k and seed
     }
     op.sourcePixel = basePixel;
-    outputBuffer[outputBufferInd+1] = op;
+    outputBuffer[outputBufferInd] = op;
+
+    path = {};
+    op = {};
+    if(pixelValidLastFrame) {
+        op = tracePath(basePixel, frameDim, temporalInputBuffer[ind(pixelLastFrame)], path); // replay should occur in this frame, but use last frame's k and seed
+    }
+    op.sourcePixel = basePixel;
+    outputBuffer[outputBufferInd + 1] = op;
+    replayedPathBuffer[basePixelInd] = path;
 }
 
 // Returns the index of the [neighborInd]th offset of [pixel]. FOr exmaple, if i wanted the spatial offset of pixel (x, y) in the first spatial pass, parameters are (x, y) and 0

@@ -8,12 +8,12 @@ import PathState;
 
 struct DebugData
 {
-    uint dummy;
-    float3 replayThp;
+    float j1;
+    float j2;
 
     __init() {
-        replayThp = 0.f;
-        dummy = 0;
+        j1 = 0.f;
+        j2 = 0.f;
     }
 };
 
@@ -66,7 +66,7 @@ struct TemporalReusePass {
 
         Reservoir r = {}; // start w blank reservoir
 
-        SampleGenerator sg = SampleGenerator(pixel, gFrameCount);
+        SampleGenerator sg = SampleGenerator(pixel, gFrameCount * 4 + 2);
         // Advance the generator to the first available dimension.
         // TODO: This is potentially expensive. We may want to store/restore the state from memory if it becomes a problem.
         for (uint i = 0; i < gPRNGDimension; i++)
@@ -84,13 +84,13 @@ struct TemporalReusePass {
         float m_den = m_num;
         if (pixelHasValidTemporalPos) { // try to shift input buffer sample into last frame
             Sample Y_lastFrame = {};
-            float inverse_jacobian = inputBuffer[ind(pixel)].X.J; // initialize to srcG, src is this pixel
+            float inverse_jacobian = 0.f;
             bool success = false;
             ShiftDebugData d = {};
             if (kShiftMappingType == (uint)ShiftMappingType::Reconnection)
             {
                 HitInfo dstHit = HitInfo(temporalVBuffer[pixelLastFrame]);
-                ShadingData y1_SD = loadShadingData(dstHit, gScene.camera.data.prevPosW, -temporalViewW[pixelLastFrame].xyz);
+                ShadingData y1_SD = loadTemporalShadingData(dstHit, gScene.camera.data.prevPosW, -temporalViewW[pixelLastFrame].xyz);
                 success = computeShiftedSample(ShiftMappingType::Reconnection, false, true,  // settings for the shift: reconnection, src is this frame and dst is last frame
                     y1_SD, // vertex right before reconnection vert on the dst domain's path
                     inputBuffer[ind(pixel)].X,        // base path aka canonical sample
@@ -105,8 +105,8 @@ struct TemporalReusePass {
 
                 HitInfo dstHit = HitInfo(replayedDataBuffer[replayInd].x_kMinus1_hitInfo);
                 float3 rayOrigin = replayedDataBuffer[replayInd].x_kMinus2_pos; //epsilon alr applied since this was a rayData.origin
-                float3 rayDir = normalize(gScene.getVertexData(dstHit.getTriangleHit()).posW - rayOrigin);
-                ShadingData y_kMinus1_SD = loadShadingData(dstHit, rayOrigin, rayDir);
+                float3 rayDir = normalize(gScene.getTemporalVertexData(dstHit.getTriangleHit()).posW - rayOrigin);
+                ShadingData y_kMinus1_SD = loadTemporalShadingData(dstHit, rayOrigin, rayDir);
                 success = computeShiftedSample(ShiftMappingType::Hybrid, false, true,  // settings for the shift: hybrid, src is this frame and dst is last frame
                     y_kMinus1_SD, // vertex right before reconnection vert on the dst domain's path
                     inputBuffer[ind(pixel)].X,             // base path aka canonical sample
@@ -114,6 +114,7 @@ struct TemporalReusePass {
                     Y_lastFrame, inverse_jacobian, sg, d); // out or inout variables
             }
             if (success) {
+                debugData.j1 = inverse_jacobian;
                 m_den += temporalBuffer[ind(pixelLastFrame)].c * luminance(Y_lastFrame.p_hat) * inverse_jacobian;
             }
         }
@@ -122,11 +123,12 @@ struct TemporalReusePass {
             w_i = 0.f;
         }
         r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg);
+        replayInd++;
 
         // Temporal
         if (pixelHasValidTemporalPos) {
             Sample X_thisFrame = {};
-            float jacobian = temporalBuffer[ind(pixelLastFrame)].X.J; // this is the denom of jacobian of shifting last frame's sample into this domain, so this is the forward jacobian
+            float jacobian = 0.f;
             bool shiftSucceeded = false;
             ShiftDebugData d = {};
             d.rcThp = float3(-1.f);
@@ -144,7 +146,6 @@ struct TemporalReusePass {
             {
                 // info needed: x_(k-1) hit info, x(k-2) position, x(k-2) to x(k-1) direction (Which can be recovered from x(k-2) and the hit info)
                 // remember the data format of the replay output buffer is interleaved, this shift is 2nd in the pair
-                replayInd++;
 
                 HitInfo dstHit = HitInfo(replayedDataBuffer[replayInd].x_kMinus1_hitInfo); //this hit info shouldve been played with last frame's random seed
                 float3 rayOrigin = replayedDataBuffer[replayInd].x_kMinus2_pos; // epsilon alr applied since this was a rayData.origin
@@ -155,8 +156,6 @@ struct TemporalReusePass {
                                          temporalBuffer[ind(pixelLastFrame)].X, // base path aka last frame's sample
                                          replayedDataBuffer[replayInd].replayedThp, // previous thp
                                          X_thisFrame, jacobian, sg, d);         // out or inout variables
-
-                debugData.replayThp = replayedDataBuffer[replayInd].replayedThp;
             }
 
             float w_i = 0.f;
@@ -168,15 +167,19 @@ struct TemporalReusePass {
 
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
                 w_i = (m_num / m_den) * luminance(X_thisFrame.p_hat) * temporalBuffer[ind(pixelLastFrame)].W_X * jacobian;
+
+                debugData.j2 = jacobian;
             }
-            r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg);
+            if (isnan(w_i)) w_i = 0.f;
+            if(r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg)){
+            }
         }
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
 
         #if IS_LAST_PASS
         // If this is the last pass, should calculate the output color
-            outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
+           outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
         #endif
 
     }

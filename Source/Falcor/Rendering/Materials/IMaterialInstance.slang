@@ -136,14 +136,11 @@ interface IMaterialInstance
     float3 eval<S : ISampleGenerator>(const ShadingData sd, const float3 wo, inout S sg);
 
 	/**
-		Intended behavior: if you have a BSDFSample struct with incoming dir [wi], outgoing dir [wo] (randomly sampled),
-		calculated weight [weight], and pdf [pdf], this function should return the equivalent of weight * pdf (aka just f * cos) given a [wo].
-
-		Used to reconstruct the throughput changes at the rc vertex and the vertex just before that
+		Evaluates the BSDF only for the allowed lobe type. This quantity is the partial path contribution f bar in the PSS integrand.
 
 		Author: faye
 	*/
-    float3 evalBSDF<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeTypes, inout S sg) {
+    float3 evalLobe<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeType, inout S sg) {
         return { 0.f, 0.f, 0.f };
     }
 

@@ -70,7 +70,7 @@ struct SpatialReusePass {
         Reservoir r = {};
         DebugData debugData = {};
 
-        SampleGenerator sg = SampleGenerator(pixel, gFrameCount);
+        SampleGenerator sg = SampleGenerator(pixel, gFrameCount * 4 + 3);
         // Advance the generator to the first available dimension.
         // TODO: This is potentially expensive. We may want to store/restore the state from memory if it becomes a problem.
         for (uint i = 0; i < gPRNGDimension; i++)

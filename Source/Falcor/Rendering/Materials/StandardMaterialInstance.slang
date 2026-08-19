@@ -73,13 +73,13 @@ struct StandardMaterialInstance : MaterialInstanceBase, IMaterialInstance
     }
 
     /**
-    See declaration of evalBSDF in IMaterialInstance.
+    See declaration of evalLobe in IMaterialInstance.
 
-    For the standard material, we only support one lobe type. As in, [allowedLobeType] cannot include more than 1 lobe type.
+    [allowedLobeType] cannot include more than 1 lobe type.
 
     // Author: faye
     */
-    float3 evalBSDF<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeType, inout S sg) {
+    float3 evalLobe<S : ISampleGenerator>(const ShadingData sd, const float3 wo, const uint allowedLobeType, inout S sg) {
         float3 wiLocal = sf.toLocal(sd.V);
         float3 woLocal = sf.toLocal(wo);
 
@@ -90,7 +90,7 @@ struct StandardMaterialInstance : MaterialInstanceBase, IMaterialInstance
         if (allowedLobeType == (uint)LobeType::All) { //special case: evalBSDF only works on ONE sampled lobe type
             return bsdf.eval(wiLocal, woLocal, sg, BSDFContext());
         }
-        return bsdf.evalBSDF(wiLocal, woLocal, allowedLobeType, sg, BSDFContext());
+        return bsdf.evalLobe(wiLocal, woLocal, allowedLobeType, sg, BSDFContext());
     }
 
     [Differentiable]
@@ -157,6 +157,10 @@ struct StandardMaterialInstance : MaterialInstanceBase, IMaterialInstance
         if (!isValidHemisphereReflectionOrTransmission(sd, sf, wiLocal, woLocal, wo)) return 0.f;
 
         StandardBSDF bsdf = StandardBSDF(wiLocal, sd.mtl, data);
+        if (allowedLobeType == (uint)LobeType::All) {
+            // special case, like if this was called by accident instead of evalPdf
+            return bsdf.evalPdf(wiLocal, woLocal, BSDFContext());
+        }
         return bsdf.evalLobePdf(wiLocal, woLocal, allowedLobeType, BSDFContext());
 
         /*if (!useImportanceSampling)
