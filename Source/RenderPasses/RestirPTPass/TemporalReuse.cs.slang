@@ -169,6 +169,12 @@ struct TemporalReusePass {
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
                 w_i = (m_num / m_den) * luminance(X_thisFrame.p_hat) * temporalBuffer[ind(pixelLastFrame)].W_X * jacobian;
 
+                /*if(jacobian < 1.f){
+                    outputColor[pixel] = float4(1, 0, 0, 1);
+                } else {
+                    outputColor[pixel] = float4(0, 1, 0, 1);
+                }*/
+
                 debugData.j2 = jacobian;
             }
             if (isnan(w_i)) w_i = 0.f;

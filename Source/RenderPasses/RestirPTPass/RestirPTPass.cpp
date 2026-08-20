@@ -161,8 +161,6 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
         return;
     }
 
-    mpPixelDebug->beginFrame(pRenderContext, targetDim);
-
     // PATH VIEWER DEBUG COMPUTE PASS
     if (mUsePathViewer)
     {
@@ -171,6 +169,8 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
 
         return;
     }
+
+    mpPixelDebug->beginFrame(pRenderContext, targetDim);
 
     if (is_set(mpScene->getUpdates(), IScene::UpdateFlags::RecompileNeeded) ||
         is_set(mpScene->getUpdates(), IScene::UpdateFlags::GeometryChanged))
@@ -599,8 +599,6 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
 }
 
 void RestirPTPass::renderUI(Gui::Widgets& widget) {
-    mpPixelDebug->renderUI(widget);
-
     bool dirty = false;
 
     dirty |= widget.var("Max bounces", mMaxBounces, 0u, 1u << 16);
@@ -639,6 +637,8 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
     {
         mOptionsChanged = true;
     }
+
+    mpPixelDebug->renderUI(widget);
 }
 
 bool RestirPTPass::onMouseEvent(const MouseEvent& mouseEvent)

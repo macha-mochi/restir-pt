@@ -106,10 +106,10 @@ struct ShadowRayData
 };
 
 struct DebugData {
-    float3 preRcThp;
+    uint2 pixel;
 
     __init() {
-        preRcThp = float3(1.f);
+        pixel = uint2(0, 0);
     }
 }
 
@@ -322,42 +322,10 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         rayData.direction = bsdfSample.wo;
         rayData.roughness = mi.getProperties(sd).roughness;
 
-        if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) { // only cancel out divided pdf in weight and update path_pdf if using RC shift
-            // bsdfsample.weight = f * dot(wo, n) / pdf
-            // wo is normalized in world space
-            rayData.p_hat_thp *= bsdfSample.weight;
-            if (rayData.path.nonDelta()) {
-                rayData.p_hat_thp *= bsdfSample.pdf;
-                rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
-            }
-        } else { // HYBRID SHIFT
-
-            uint numLobeTypes = 0;
-            if (bsdfSample.isLobe(LobeType::DiffuseReflection)) {
-                numLobeTypes++;
-            }
-            if (bsdfSample.isLobe(LobeType::DiffuseTransmission)) {
-                numLobeTypes++;
-            }
-            if (bsdfSample.isLobe(LobeType::SpecularReflection)) {
-                numLobeTypes++;
-            }
-            if(bsdfSample.isLobe(LobeType::SpecularTransmission)) {
-                numLobeTypes++;
-            }
-            if (numLobeTypes > 1) {
-
-                //printf("Num lobe types > 1");
-            }
-            float3 fOverP;
-            if(bsdfSample.isLobe(LobeType::Delta)) {
-                //evalLobe will return 0, we need to use the sample weight
-                fOverP = bsdfSample.weight;
-            } else {
-                fOverP = mi.evalLobe(sd, bsdfSample.wo, bsdfSample.lobeType, rayData.sgScatterRays); // use the seed you'll replay later
-                fOverP /= mi.evalLobePdf(sd, bsdfSample.wo, bsdfSample.lobeType);
-            }
-            rayData.p_hat_thp *= fOverP;
+        rayData.p_hat_thp *= bsdfSample.weight;
+        if (kShiftMappingType == (uint)ShiftMappingType::Reconnection && rayData.path.nonDelta()) {
+            rayData.p_hat_thp *= bsdfSample.pdf;
+            rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
         }
         rayData.sampledLobeType = bsdfSample.lobeType;
 
@@ -842,6 +810,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 
         // Prepare ray payload.
         ScatterRayData rayData = ScatterRayData(sg, sgScatterRays);
+        rayData.d.pixel = pixel;
 
         // Initialize data carriers and information needed for shift mappings
         Sample curBSDFSample = {};
@@ -1041,7 +1010,6 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         gReplayInputBuffer[bufferInd].k = r.X.k;
         gReplayInputBuffer[bufferInd].seed = sgScatterRaysState;
 
-        rayData.d.preRcThp = shiftContext.thp_upToIncl_xk; //DEBUGGING FOR THE RANDOM REPLAY
         debugBuffer[bufferInd] = rayData.d;
     }
     else
@@ -1237,9 +1205,6 @@ void rayGen()
 // we calculate the final color here
     outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
     #endif
-
-    printSetPixel(pixel);
-    print("hi %d", 1);
 }
 
 /**

@@ -121,7 +121,7 @@ bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator 
     if (!sampleLight(vertex.pos, ld, sg, lightSample)) return false;
 
     // Setup returned sample.
-    ls.pdf = (lightSample.pdf == 0 ? 1.f : lightSample.pdf) / lightCount; // handle the Point and Directional pdfs being 0
+    ls.pdf = (lightSample.pdf > 0.f ? lightSample.pdf : 1.f) / lightCount; // handle the Point and Directional pdfs being 0
     ls.Li = lightSample.Li * lightCount;
     // Offset shading position to avoid self-intersection.
     ls.origin = vertex.getRayOrigin(lightSample.dir);
@@ -129,7 +129,7 @@ bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator 
     // Do not worry about adjusting the ray length to avoid self-intersections at the light.
     ls.distance = lightSample.distance;
     ls.dir = lightSample.dir;
-    ls.g = (ls.distance == kMaxLightDistance || lightSample.pdf == 0) ? 1.f : (abs(dot(-ls.dir, lightSample.normalW)) / (ls.distance * ls.distance));
+    ls.g = (ls.distance < kMaxLightDistance && lightSample.pdf > 0.f) ? (abs(dot(-ls.dir, lightSample.normalW)) / (ls.distance * ls.distance)) : 1.f;
     // if dist squared is infinity you cant convert to area
 
     return any(ls.Li > 0.f);
@@ -335,7 +335,8 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
     let lod1 = ExplicitLodTextureSampler(0.f);
     let y_kMinus1_mi = gScene.materials.getMaterialInstance(y_sd, lod1);
 
-    //Create variables we will use later
+    // Create variables we will use later
+    float misWeight = 1.f;
     float3 rcThp = float3(1.f); //includes new thp at y_(k-1) and y_k if needed
     float3 incomingRadiance = float3(0.f); // depending on case, could be radiance coming into x_k from x_(k+1), or from x_k into x_(k-1)
     float jacobian_denom = srcX.J;
@@ -361,13 +362,12 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             }
 
             // calc mis weight
-            float misWeight = 1.f;
             if (ls.lightType != (uint)NEELightType::Analytic) {
                 float bsdfPdf = y_kMinus1_mi.evalPdf(y_sd, ls.dir, true);
                 misWeight = ls.pdf / (bsdfPdf + ls.pdf);
             }
 
-            rcThp = misWeight * y_kMinus1_mi.eval(y_sd, ls.dir, neeSG);  // this is still same random number as used in gen candidates so its ok
+            rcThp = y_kMinus1_mi.eval(y_sd, ls.dir, neeSG);  // this is still same random number as used in gen candidates so its ok
             incomingRadiance = ls.Li * ls.pdf;                           // ls.Li is predivided by pdf
             if (shiftType == ShiftMappingType::Reconnection) {
                 jacobian_num = ls.g; // since we used the same random numbers, we should sample the same light type so g being invalid (i set it to 1.f) shouldnt cause problems
@@ -385,18 +385,16 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                 //calc mis weight
                 float bsdfPdf = y_kMinus1_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true); // actually the pdf of incoming to x_k
                 float lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(srcX.rcVertex.outgoingDir); // actually incoming dir to x_k
-                float misWeight = bsdfPdf / (bsdfPdf + lightPdf);
-                d.misWeight = misWeight;
+                misWeight = bsdfPdf / (bsdfPdf + lightPdf);
 
                 incomingRadiance = srcX.rcVertex.incomingRadiance;
                 if (shiftType == ShiftMappingType::Reconnection) {
                     rcThp = y_kMinus1_mi.eval(y_sd, srcX.rcVertex.outgoingDir, sg);
                     jacobian_num = 1.f; //CAUTION: not sure if this is right (see comment where r.J was assigned in GenCandidates) but we will probably use hybrid most of the time anyway
                 } else if (shiftType == ShiftMappingType::Hybrid) {
-                    rcThp = misWeight * y_kMinus1_mi.evalLobe(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.prevSampledLobeType, sg);
-                    float lobePdf = y_kMinus1_mi.evalLobePdf(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.prevSampledLobeType);
-                    rcThp /= lobePdf;       // for PSS
-                    jacobian_num = lobePdf; //also not including g bc env map has no valid g
+                    rcThp = y_kMinus1_mi.evalLobe(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.prevSampledLobeType, sg);
+                    rcThp /= y_kMinus1_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true); // we divide contribution by normal (not lobe) p
+                    jacobian_num = y_kMinus1_mi.evalLobePdf(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.prevSampledLobeType); //also not including g bc env map has no valid g
                 }
             } // leave emissive for rcVertex is valid case
         } else {
@@ -432,20 +430,17 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             return false; // this shift is not valid if x_k is occluded from y_(k-1)
         }
 
-        float p_ykMinus1_xk = 0.f;
+        float p_ykMinus1_xk = y_kMinus1_mi.evalPdf(y_sd, rcIncomingDir, true);
         if (shiftType == ShiftMappingType::Reconnection) {
             rcThp = y_kMinus1_mi.eval(y_sd, rcIncomingDir, sg);
-            p_ykMinus1_xk = y_kMinus1_mi.evalPdf(y_sd, rcIncomingDir, true);
         } else if(shiftType == ShiftMappingType::Hybrid) {
             rcThp = y_kMinus1_mi.evalLobe(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType, sg);
-            p_ykMinus1_xk = y_kMinus1_mi.evalLobePdf(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType);
             rcThp /= p_ykMinus1_xk;
 
             // jacobian numerator: solid angle pdf of y_(k-1) to x_k * G * solid angle pdf of x_k to x_(k+1)
             // we get the first p here for specific lobe
             jacobian_num = y_kMinus1_mi.evalLobePdf(y_sd, rcIncomingDir, srcX.rcVertex.prevSampledLobeType);
         }
-        d.kMinus1_rcThp = rcThp;
 
         // Now re-eval bsdf at x_k. start by getting sd
         if (temporalDst) {
@@ -470,7 +465,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
         //Branch: handle k = d bsdf emissive
         if (srcX.k == srcX.path.getVertexIndex() && srcX.path.isBSDFSampled() && srcX.path.sampledEmissive()) {
             incomingRadiance = x_k_mi.getProperties(y_sd).emission;
-            //jacobian numerator is complete in this case bc no x_(k+1)
+            //jacobian numerator, rcThp are both done in this case bc no x_(k+1)
 
             // Calc mis weight if non delta and hybrid
             if (shiftType == ShiftMappingType::Hybrid && (srcX.rcVertex.prevSampledLobeType & LobeType::NonDelta) != 0) {
@@ -485,23 +480,18 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                 bool upperHemisphere = srcX.path.isLightSampledUpper() && !srcX.path.isLightSampledLower(); // Emissive light samplers have an option to exclusively sample the upper hemisphere
                 // first 2 args to evalPdf are for the vertex before the light
                 float lightPdf = getEmissiveSelectionProbability() * emissiveSampler.evalPdf(y_kMinus1_rayOrigin, y_kMinus1_normal, upperHemisphere, lightHit);
-
-                float misWeight = bsdfPdf / (bsdfPdf + lightPdf);
-                rcThp *= misWeight;
+                misWeight = bsdfPdf / (bsdfPdf + lightPdf);
             }
         } else {
             incomingRadiance = srcX.rcVertex.incomingRadiance;
             if (shiftType == ShiftMappingType::Reconnection) {
                 rcThp *= x_k_mi.eval(y_sd, srcX.rcVertex.outgoingDir, sg);
             } else if (shiftType == ShiftMappingType::Hybrid) {
-                rcThp *= x_k_mi.evalLobe(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType, sg); // bsdf * cos for y2. if next vert was nee, evalLobe will basically call eval which is good
-            
-                float k_kPlus1_lobe_pdf = x_k_mi.evalLobePdf(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType);
-                
+                float k_kPlus1_pdf = x_k_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true);
                 // Find bsdf/nee mis weight if this is k = d-1 path and x_k was not delta.
                 // if delta, k_kPlus1_lobe_pdf will get set to p_bsdf. this is correct for hybrid shift bc you shouldnt have a delta x_k and nee sampled k+1 anyway
                 if (srcX.k == srcX.path.getVertexIndex() - 1 && (srcX.rcVertex.sampledLobeType & LobeType::NonDelta) != 0) {
-                    float bsdfPdf = x_k_mi.evalPdf(y_sd, srcX.rcVertex.outgoingDir, true);
+                    float bsdfPdf = k_kPlus1_pdf;
                     float lightPdf = 0.f;
                     if (srcX.path.sampledEnvMap()) {
                         lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(srcX.rcVertex.outgoingDir);
@@ -536,17 +526,25 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                     float misWeight = 1.f;
                     if(srcX.path.isBSDFSampled()){
                         misWeight = bsdfPdf / (bsdfPdf + lightPdf); // impossible to have sampled analytic here
-                        //k_kPlus1_lobe_pdf alr set
+                        // k_kPlus1_lobe_pdf alr set
+                        jacobian_num *= x_k_mi.evalLobePdf(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType);
                     } else if (srcX.path.isNEESampled()) {
                         misWeight = srcX.path.sampledAnalytic() ? 1.f : (lightPdf / (lightPdf + bsdfPdf));
-                        k_kPlus1_lobe_pdf = lightPdf;
+                        k_kPlus1_pdf = lightPdf;
+                        jacobian_num *= lightPdf;
                     }
-                    rcThp *= misWeight;
+                } else {
+                    // k < d - 1
                 }
 
-                jacobian_num *= k_kPlus1_lobe_pdf; // finish calculating jacobian for hybrid shift (form: ratio of pdf * G * pdf)
-
-                rcThp /= k_kPlus1_lobe_pdf; // for PSS
+                if (srcX.path.isBSDFSampled()) {
+                    jacobian_num *= x_k_mi.evalLobePdf(y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType); // finish calculating jacobian for hybrid shift (form: ratio of pdf * G * pdf)
+                } else if(srcX.path.isNEESampled()){
+                    jacobian_num *= k_kPlus1_pdf; //this is the solid angle pdf of nee 
+                }
+                
+                rcThp *= x_k_mi.evalLobe( y_sd, srcX.rcVertex.outgoingDir, srcX.rcVertex.sampledLobeType, sg); // bsdf * cos for y2. if next vert was nee, evalLobe will basically call eval which is good
+                rcThp /= k_kPlus1_pdf; // for PSS
             }
             
         }
@@ -554,7 +552,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
 
     if(any(isnan(rcThp))) rcThp = float3(0.f);
     // Find p_hat for shifted X
-    Y.p_hat = prevThp * rcThp * incomingRadiance; // CAUTION / TODO: we assume that the rest of the path didnt become occluded temporally, for incomingRadiance
+    Y.p_hat = prevThp * misWeight * rcThp * incomingRadiance; // CAUTION / TODO: we assume that the rest of the path didnt become occluded temporally, for incomingRadiance
     d.rcThp = rcThp;
     d.incomingRadiance = incomingRadiance;
     // you will find shifted w_i afneter this method since we need to eval mis weight
