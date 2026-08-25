@@ -116,6 +116,7 @@ struct TemporalReusePass {
             }
             if (success) {
                 debugData.j1 = inverse_jacobian;
+
                 m_den += temporalBuffer[ind(pixelLastFrame)].c * luminance(Y_lastFrame.p_hat) * inverse_jacobian;
             }
         }
@@ -176,13 +177,22 @@ struct TemporalReusePass {
                 }*/
 
                 debugData.j2 = jacobian;
+                
             }
             if (isnan(w_i)) w_i = 0.f;
-            if(r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg)){
+            if (r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg)) {
+                //outputColor[pixel] = float4(0, 1, 0, 1);
             }
         }
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
+
+        printSetPixel(pixel);
+        print("input p hat: ", temporalBuffer[ind(pixelLastFrame)].X.p_hat);
+        print("input W_X: ", temporalBuffer[ind(pixelLastFrame)].W_X);
+        print("output p hat: ", r.X.p_hat);
+        print("output W: ", r.W_X);
+
 
         #if IS_LAST_PASS
         // If this is the last pass, should calculate the output color

@@ -353,17 +353,7 @@ struct StandardBSDF : IBSDF, IDifferentiable
     */
     float evalLobePdf(const float3 wi, const float3 wo, const uint allowedLobeType, BSDFContext bc)
     {
-        float pdf = evalPdf(wi, wo, bc);
         if (pDiffuseReflection > 0.f && (allowedLobeType & LobeType::DiffuseReflection) != 0)
-            return pDiffuseReflection * pdf;
-        if (pDiffuseTransmission > 0.f && (allowedLobeType & LobeType::DiffuseTransmission) != 0)
-            return pDiffuseTransmission * pdf;
-        if (pSpecularReflection > 0.f && (allowedLobeType & LobeType::SpecularReflection) != 0)
-            return pSpecularReflection * pdf;
-        if (pSpecularTransmission > 0.f && (allowedLobeType & LobeType::SpecularTransmission) != 0)
-            return pSpecularTransmission * pdf;
-        return 0.f;
-        /*if (pDiffuseReflection > 0.f && (allowedLobeType & LobeType::DiffuseReflection) != 0)
             return pDiffuseReflection * diffuseReflection.evalPdf(wi, wo, bc);
         if (pDiffuseTransmission > 0.f && (allowedLobeType & LobeType::DiffuseTransmission) != 0)
             return pDiffuseTransmission * diffuseTransmission.evalPdf(wi, wo, bc);
@@ -371,7 +361,7 @@ struct StandardBSDF : IBSDF, IDifferentiable
             return pSpecularReflection * specularReflection.evalPdf(wi, wo, bc);
         if (pSpecularTransmission > 0.f && (allowedLobeType & LobeType::SpecularTransmission) != 0)
             return pSpecularTransmission * specularTransmission.evalPdf(wi, wo, bc);
-        return 0.f;*/
+        return 0.f;
     }
 
     AlbedoContributions evalAlbedo(const float3 wi, const LobeType lobetype)

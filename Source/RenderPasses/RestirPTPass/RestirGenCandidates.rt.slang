@@ -324,10 +324,19 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
 
         rayData.p_hat_thp *= bsdfSample.weight;
         if (kShiftMappingType == (uint)ShiftMappingType::Reconnection && rayData.path.nonDelta()) {
-            rayData.p_hat_thp *= bsdfSample.pdf;
-            rayData.path_pdf *= bsdfSample.pdf; // pdf is in solid angle
+            float samplePdf = mi.evalLobePdf(sd, bsdfSample.wo, bsdfSample.lobeType);
+            rayData.p_hat_thp *= samplePdf;
+            rayData.path_pdf *= samplePdf;
         }
         rayData.sampledLobeType = bsdfSample.lobeType;
+
+        /*if(rayData.path.getVertexIndex() == 1){
+            printSetPixel(rayData.d.pixel);
+            print("x1 thp: ", rayData.p_hat_thp);
+            //print("x1 weight times pdf: ", bsdfSample.weight * bsdfSample.pdf);
+            print("x1 eval normal: ", mi.eval(sd, bsdfSample.wo, rayData.sg));
+            print("x1 eval lobe: ", mi.evalLobe(sd, bsdfSample.wo, bsdfSample.lobeType, rayData.sg));
+        }*/
 
         return any(rayData.p_hat_thp > 0.f);
     }
@@ -705,6 +714,20 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
             }
 
             float3 weight = mi.eval(sd, ls.dir, rayData.sg); // f * cos
+
+            /*if (rayData.path.getVertexIndex() == 1) {
+                printSetPixel(rayData.d.pixel);
+                print("x1 nee f: ", weight);
+                print("mis weight: ", misWeight);
+                print("Li (without pdf): ", ls.Li * ls.pdf);
+            }*/
+            /*if (rayData.path.getVertexIndex() == 2) {
+                printSetPixel(rayData.d.pixel);
+                print("x2 nee f: ", weight);
+                //print("mis weight: ", misWeight);
+                print("Li (without pdf): ", ls.Li * ls.pdf);
+            }*/
+
             float3 Lr = weight * ls.Li;
             if (any(Lr > 0.f))
             {
@@ -1200,6 +1223,10 @@ void rayGen()
 
     Reservoir r = tracePath(pixel, frameDim);
     gReservoirBuffer[pixelInd] = r;
+
+    printSetPixel(pixel);
+    print("cand p hat: ", r.X.p_hat);
+    print("cand W_X: ", r.W_X);
 
     #if IS_LAST_PASS
 // we calculate the final color here
