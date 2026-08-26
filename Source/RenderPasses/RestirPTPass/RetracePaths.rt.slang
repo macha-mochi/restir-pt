@@ -38,6 +38,8 @@ static const float kHybridShiftRoughnessThreshold = 0.2f; // got this value from
 
 struct ScatterRayData
 {
+    uint2 pixel;
+
     PathState path;
     float3 thp;       ///< The replayed thp, in PSS parametrization (product of "f/p" terms)
     float3 origin;    ///< Next path segment origin.
@@ -53,6 +55,8 @@ struct ScatterRayData
     SampleGenerator sg; ///< Per-ray state for the sample generator (up to 16B).
 
     __init(SampleGenerator sg) {
+        pixel = uint2(0);
+
         thp = float3(1.f);
         origin = float3(0.f);
         direction = float3(0.f);
@@ -111,14 +115,13 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, float3
 
         // bsdfsample.weight = f * dot(wo, n) / pdf
         // wo is normalized in world space
-        float3 fOverP = mi.evalLobe(sd, bsdfSample.wo, bsdfSample.lobeType, rayData.sg);
-        if ((bsdfSample.lobeType & (uint)LobeType::NonDelta) != 0) {
-            fOverP /= mi.evalLobePdf(sd, bsdfSample.wo, bsdfSample.lobeType);
-        }
-        rayData.thp *= fOverP;
+        rayData.thp *= bsdfSample.weight;
 
         return any(rayData.thp > 0.f);
     }
+
+    printSetPixel(rayData.pixel);
+    print("mi sample failed", 0);
 
     return false;
 }
@@ -194,6 +197,8 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
     const uint stopVertex = replayParams.k;
     if (hit.isValid() && stopVertex > 2)
     {
+        printSetPixel(pixel);
+        print("reached retrace main", 0);
         SampleGenerator sg = SampleGenerator(0);
         sg.rng.state = replayParams.seed;
 
@@ -204,6 +209,7 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
 
         //Prepare payload
         ScatterRayData rayData = ScatterRayData(sg);
+        rayData.pixel = pixel;
 
         // Calc primary ray footprint
         float3 x0_to_x1 = sd.posW - primaryRayOrigin;
@@ -221,6 +227,8 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
         for (uint vertex = 2; vertex <= stopVertex - 1 && !rayData.path.isTerminated(); vertex++)
         {
+            printSetPixel(pixel);
+            print("replay reached: ", vertex);
             // Vertex dependent things
             if (vertex == stopVertex - 1) { //we are about to hit x_k-1 
                 op.replayedThp = rayData.thp; // thp right now is what we want, having just hit x_k-2. Store the info carried by rayData

@@ -185,23 +185,31 @@ struct TemporalReusePass {
 
                 debugData.j2 = jacobian;
             }
-            /*float oldLumi = luminance(temporalBuffer[ind(pixelLastFrame)].X.p_hat);
+            float oldLumi = luminance(temporalBuffer[ind(pixelLastFrame)].X.p_hat);
             if(oldLumi > 0){
                 if(shiftSucceeded){
                     outputColor[pixel] = float4(0, 1, 0, 1);
                 } else {
                     outputColor[pixel] = float4(1, 0, 0, 1);
+                    PathState path = temporalBuffer[ind(pixelLastFrame)].X.path;
+                    if (path.getVertexIndex() == temporalBuffer[ind(pixelLastFrame)].X.k) {
+                        if (path.isNEESampled()) {
+                            outputColor[pixel] = float4(0, 0, 1, 1);
+                        } else if(path.isBSDFSampled()){
+                            outputColor[pixel] = float4(0, 1, 1, 1);
+                        }
+                        
+                    }
                     printSetPixel(pixel);
                     print("temporal reservoir k: ", temporalBuffer[ind(pixelLastFrame)].X.k);
                     print("fail reason: ", d.failReason);
-                    if (d.failReason == 3) {
-                        print("k-1 ", d.ykMinus1);
-                        print("rc incoming ", d.rcIncomingDir);
-                        print("length: ", d.shadowRayDist);
+                    if (d.failReason == 4) {
+                        print("jacobian ", jacobian);
+                        print("Y p hat ", X_thisFrame.p_hat);
                     }
                     
                 }
-            }*/
+            }
             if (isnan(w_i)) w_i = 0.f;
             if (r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg)) {
                 printSetPixel(pixel);

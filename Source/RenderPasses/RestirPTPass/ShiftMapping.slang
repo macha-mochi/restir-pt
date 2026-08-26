@@ -21,9 +21,6 @@ ParameterBlock<EmissiveLightSampler> emissiveSampler; ///< Emissive light sample
 
 struct ShiftDebugData {
     uint failReason;
-    uint genLightSample;
-    uint shadowRay;
-    uint noLightType;
 
     float3 rcThp;
     float3 incomingRadiance;
@@ -32,19 +29,8 @@ struct ShiftDebugData {
     float3 eval1;
     float3 fOverP2;
 
-    float3 ykMinus1;
-    float3 rcIncomingDir;
-    float3 shadowRayDist;
-
     __init() {
         failReason = 0;
-        genLightSample = 0;
-        shadowRay = 0;
-        noLightType = 0;
-
-        ykMinus1 = float3(0);
-        rcIncomingDir = float3(0);
-        shadowRayDist = float3(0);
 
         misWeight = 0;
         rcThp = float3(0.f);
@@ -372,14 +358,12 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
 
             bool validSample = generateLightSample(vertex_kMinus1, srcX.path.isLightSampledUpper(), srcX.path.isLightSampledLower(), neeSG, ls);
             if (!validSample) {
-                d.genLightSample = 1;
                 return false; // the base path was valid so if this isnt valid return false
             }
 
             // trace shadow ray
             bool visible = traceShadowRay(ls.origin, ls.dir, ls.distance);
             if (!visible) {
-                d.shadowRay = 1;
                 return false;
             }
 
@@ -404,7 +388,6 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                 float3 origin = y_sd.computeRayOrigin();
                 bool visible = traceShadowRay(origin, srcX.rcVertex.outgoingDir, kRayTMax);
                 if (!visible) {
-                    d.shadowRay = 1;
                     return false;
                 }
 
@@ -425,7 +408,6 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
                 d.fOverP1 = rcThp;
             } // leave emissive for rcVertex is valid case
         } else {
-            d.noLightType = 1;
             return false;
         }
     }
@@ -445,7 +427,8 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
         d.failReason = 2;
         return false;
     }
-    float3 y_kMinus1_rayOrigin = y_sd.computeRayOrigin();
+    bool isTransmission = (srcX.rcVertex.prevSampledLobeType & (uint)LobeType::Transmission) != 0;
+    float3 y_kMinus1_rayOrigin = y_sd.computeRayOrigin(!isTransmission);
     float3 y_kMinus1_normal = y_sd.getOrientedFaceNormal(); 
     float3 toRCVert = rcPos - y_kMinus1_rayOrigin; // use sd.pos- rayOrigin pattern because that is what's used in other parts of falcor. stay consistent! this also prevents self intersections when we trace shadow ray
     float3 rcIncomingDir = normalize(toRCVert);
@@ -455,9 +438,6 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
         float epsilon = 1e-2f; // shorten shadow ray distance to avoid reporting rcPos as intersection
         if (!traceShadowRay(y_kMinus1_rayOrigin, rcIncomingDir, length(toRCVert) - epsilon)) { // TODO / CAUTION: this is traced against current BVH / accel structure. in a dynamic scene this will cause bias.
             d.failReason = 3;
-            d.ykMinus1 = y_kMinus1_rayOrigin;
-            d.rcIncomingDir = rcIncomingDir;
-            d.shadowRayDist = length(toRCVert) - epsilon;
             return false; // this shift is not valid if x_k is occluded from y_(k-1)
         }
 
