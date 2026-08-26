@@ -40,7 +40,8 @@ struct TemporalReusePass {
     StructuredBuffer<Reservoir> temporalBuffer;
     StructuredBuffer<float3> di_bgBuffer;
     StructuredBuffer<RandomReplayOutput> replayedDataBuffer;
-    // Outputs
+    // Outputs / modified things
+    RWStructuredBuffer<RandomReplayInput> replayedInputBuffer; // we need to write the results of this pass to this buffer.
     RWStructuredBuffer<Reservoir> outputBuffer;
     RWTexture2D<float4> outputColor;
 
@@ -117,6 +118,17 @@ struct TemporalReusePass {
             if (success) {
                 debugData.j1 = inverse_jacobian;
 
+                if (Y_lastFrame.k == 2) {
+                    printSetPixel(pixel);
+                    print("resampling starts here", 0);
+                    /*print("x1 f/p: ", d.fOverP1);
+                    print("x2 f/p: ", d.fOverP2);
+                    print("mis weight: ", d.misWeight);
+                    print("incomingRadiance: ", d.incomingRadiance);*/
+                    print("old p hat: ", inputBuffer[ind(pixel)].X.p_hat);
+                    print("new p hat: ", Y_lastFrame.p_hat);
+                }
+
                 m_den += temporalBuffer[ind(pixelLastFrame)].c * luminance(Y_lastFrame.p_hat) * inverse_jacobian;
             }
         }
@@ -149,10 +161,11 @@ struct TemporalReusePass {
                 // info needed: x_(k-1) hit info, x(k-2) position, x(k-2) to x(k-1) direction (Which can be recovered from x(k-2) and the hit info)
                 // remember the data format of the replay output buffer is interleaved, this shift is 2nd in the pair
 
-                HitInfo dstHit = HitInfo(replayedDataBuffer[replayInd].x_kMinus1_hitInfo); //this hit info shouldve been played with last frame's random seed
+                HitInfo dstHit = HitInfo(replayedDataBuffer[replayInd] .x_kMinus1_hitInfo); // this hit info shouldve been played with last frame's random seed
                 float3 rayOrigin = replayedDataBuffer[replayInd].x_kMinus2_pos; // epsilon alr applied since this was a rayData.origin
                 float3 rayDir = normalize(gScene.getVertexData(dstHit.getTriangleHit()).posW - rayOrigin);
                 ShadingData y_kMinus1_SD = loadShadingData(dstHit, rayOrigin, rayDir);
+
                 shiftSucceeded = computeShiftedSample(ShiftMappingType::Hybrid, true, false, // settings for the shift: hybrid, temporal src not dst
                                          y_kMinus1_SD, // vertex right before reconnection vert on the dst domain's path
                                          temporalBuffer[ind(pixelLastFrame)].X, // base path aka last frame's sample
@@ -170,29 +183,38 @@ struct TemporalReusePass {
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
                 w_i = (m_num / m_den) * luminance(X_thisFrame.p_hat) * temporalBuffer[ind(pixelLastFrame)].W_X * jacobian;
 
-                /*if(jacobian < 1.f){
-                    outputColor[pixel] = float4(1, 0, 0, 1);
-                } else {
-                    outputColor[pixel] = float4(0, 1, 0, 1);
-                }*/
-
                 debugData.j2 = jacobian;
-                
             }
+            /*float oldLumi = luminance(temporalBuffer[ind(pixelLastFrame)].X.p_hat);
+            if(oldLumi > 0){
+                if(shiftSucceeded){
+                    outputColor[pixel] = float4(0, 1, 0, 1);
+                } else {
+                    outputColor[pixel] = float4(1, 0, 0, 1);
+                    printSetPixel(pixel);
+                    print("temporal reservoir k: ", temporalBuffer[ind(pixelLastFrame)].X.k);
+                    print("fail reason: ", d.failReason);
+                    if (d.failReason == 3) {
+                        print("k-1 ", d.ykMinus1);
+                        print("rc incoming ", d.rcIncomingDir);
+                        print("length: ", d.shadowRayDist);
+                    }
+                    
+                }
+            }*/
             if (isnan(w_i)) w_i = 0.f;
             if (r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg)) {
-                //outputColor[pixel] = float4(0, 1, 0, 1);
+                printSetPixel(pixel);
+                print("last frame's p hat: ", temporalBuffer[ind(pixelLastFrame)].X.p_hat);
+                //print("input W_X: ", temporalBuffer[ind(pixelLastFrame)].W_X);
+                print("output p hat: ", r.X.p_hat);
+                //print("output W: ", r.W_X);
             }
         }
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
-
-        printSetPixel(pixel);
-        print("input p hat: ", temporalBuffer[ind(pixelLastFrame)].X.p_hat);
-        print("input W_X: ", temporalBuffer[ind(pixelLastFrame)].W_X);
-        print("output p hat: ", r.X.p_hat);
-        print("output W: ", r.W_X);
-
+        replayedInputBuffer[ind(pixel)].k = r.X.k;
+        replayedInputBuffer[ind(pixel)].seed = r.X.seed;
 
         #if IS_LAST_PASS
         // If this is the last pass, should calculate the output color

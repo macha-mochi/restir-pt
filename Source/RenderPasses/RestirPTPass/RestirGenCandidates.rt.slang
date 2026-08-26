@@ -330,13 +330,10 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         }
         rayData.sampledLobeType = bsdfSample.lobeType;
 
-        /*if(rayData.path.getVertexIndex() == 1){
+        if(rayData.path.getVertexIndex() == 1){
             printSetPixel(rayData.d.pixel);
-            print("x1 thp: ", rayData.p_hat_thp);
-            //print("x1 weight times pdf: ", bsdfSample.weight * bsdfSample.pdf);
-            print("x1 eval normal: ", mi.eval(sd, bsdfSample.wo, rayData.sg));
-            print("x1 eval lobe: ", mi.evalLobe(sd, bsdfSample.wo, bsdfSample.lobeType, rayData.sg));
-        }*/
+            print("x1 bsdf f/p: ", rayData.p_hat_thp);
+        }
 
         return any(rayData.p_hat_thp > 0.f);
     }
@@ -715,12 +712,12 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
 
             float3 weight = mi.eval(sd, ls.dir, rayData.sg); // f * cos
 
-            /*if (rayData.path.getVertexIndex() == 1) {
+            if (rayData.path.getVertexIndex() == 1) {
                 printSetPixel(rayData.d.pixel);
-                print("x1 nee f: ", weight);
-                print("mis weight: ", misWeight);
-                print("Li (without pdf): ", ls.Li * ls.pdf);
-            }*/
+                print("x1 nee f/p: ", weight / ls.pdf);
+                print("x1 nee mis weight: ", misWeight);
+                print("x1 Li (without /p): ", ls.Li * ls.pdf);
+            }
             /*if (rayData.path.getVertexIndex() == 2) {
                 printSetPixel(rayData.d.pixel);
                 print("x2 nee f: ", weight);
@@ -1031,6 +1028,8 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 
         // Set info that might be needed by random replay later
         gReplayInputBuffer[bufferInd].k = r.X.k;
+        printSetPixel(pixel);
+        print("gen candidates - k: ", r.X.k);
         gReplayInputBuffer[bufferInd].seed = sgScatterRaysState;
 
         debugBuffer[bufferInd] = rayData.d;
@@ -1223,10 +1222,6 @@ void rayGen()
 
     Reservoir r = tracePath(pixel, frameDim);
     gReservoirBuffer[pixelInd] = r;
-
-    printSetPixel(pixel);
-    print("cand p hat: ", r.X.p_hat);
-    print("cand W_X: ", r.W_X);
 
     #if IS_LAST_PASS
 // we calculate the final color here

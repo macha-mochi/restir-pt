@@ -379,6 +379,8 @@ void rayGenTemporal()
     op = {};
     if(pixelValidLastFrame) {
         op = tracePath(basePixel, frameDim, temporalInputBuffer[ind(pixelLastFrame)], path); // replay should occur in this frame, but use last frame's k and seed
+        printSetPixel(basePixel);
+        print("temporal input buffer k", temporalInputBuffer[ind(pixelLastFrame)].k);
     }
     op.sourcePixel = basePixel;
     outputBuffer[outputBufferInd + 1] = op;

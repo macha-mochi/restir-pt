@@ -37,6 +37,7 @@ struct SpatialReusePass {
     StructuredBuffer<int2> spatialOffsetBuffer; // stores the offsets from a pixel, which could take on negative values
     StructuredBuffer<RandomReplayOutput> replayedDataBuffer;
     // Outputs
+    RWStructuredBuffer<RandomReplayInput> replayedInputBuffer;
     RWStructuredBuffer<Reservoir> outputBuffer;
     RWTexture2D<float4> outputColor;
 
@@ -252,6 +253,8 @@ struct SpatialReusePass {
 
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
+        replayedInputBuffer[ind(pixel)].k = r.X.k;
+        replayedInputBuffer[ind(pixel)].seed = r.X.seed;
 
         outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
     }

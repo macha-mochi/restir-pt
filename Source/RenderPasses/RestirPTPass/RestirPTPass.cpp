@@ -504,6 +504,7 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     passVar["di_bgBuffer"] = mpDiBgBuffer;
     if (mShiftMappingType == ShiftMappingType::Hybrid)
     {
+        passVar["replayedInputBuffer"] = mpReplayInputBuffers[mReplayInputID];
         passVar["replayedDataBuffer"] = mpReplayOutputBuffer;
     }
 
