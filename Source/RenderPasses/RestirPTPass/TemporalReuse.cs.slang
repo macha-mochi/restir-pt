@@ -10,11 +10,9 @@ import Utils.Debug.PixelDebug;
 struct DebugData
 {
     float j1;
-    float j2;
 
     __init() {
         j1 = 0.f;
-        j2 = 0.f;
     }
 };
 
@@ -116,19 +114,6 @@ struct TemporalReusePass {
                     Y_lastFrame, inverse_jacobian, sg, d); // out or inout variables
             }
             if (success) {
-                debugData.j1 = inverse_jacobian;
-
-                if (Y_lastFrame.k == 2) {
-                    printSetPixel(pixel);
-                    print("resampling starts here", 0);
-                    /*print("x1 f/p: ", d.fOverP1);
-                    print("x2 f/p: ", d.fOverP2);
-                    print("mis weight: ", d.misWeight);
-                    print("incomingRadiance: ", d.incomingRadiance);*/
-                    print("old p hat: ", inputBuffer[ind(pixel)].X.p_hat);
-                    print("new p hat: ", Y_lastFrame.p_hat);
-                }
-
                 m_den += temporalBuffer[ind(pixelLastFrame)].c * luminance(Y_lastFrame.p_hat) * inverse_jacobian;
             }
         }
@@ -182,42 +167,10 @@ struct TemporalReusePass {
 
                 // evaluate Y's 'w_i = mis * p hat * W_X * jacobian
                 w_i = (m_num / m_den) * luminance(X_thisFrame.p_hat) * temporalBuffer[ind(pixelLastFrame)].W_X * jacobian;
+            }
 
-                debugData.j2 = jacobian;
-            }
-            float oldLumi = luminance(temporalBuffer[ind(pixelLastFrame)].X.p_hat);
-            if(oldLumi > 0){
-                if(shiftSucceeded){
-                    outputColor[pixel] = float4(0, 1, 0, 1);
-                } else {
-                    outputColor[pixel] = float4(1, 0, 0, 1);
-                    PathState path = temporalBuffer[ind(pixelLastFrame)].X.path;
-                    if (path.getVertexIndex() == temporalBuffer[ind(pixelLastFrame)].X.k) {
-                        if (path.isNEESampled()) {
-                            outputColor[pixel] = float4(0, 0, 1, 1);
-                        } else if(path.isBSDFSampled()){
-                            outputColor[pixel] = float4(0, 1, 1, 1);
-                        }
-                        
-                    }
-                    printSetPixel(pixel);
-                    print("temporal reservoir k: ", temporalBuffer[ind(pixelLastFrame)].X.k);
-                    print("fail reason: ", d.failReason);
-                    if (d.failReason == 4) {
-                        print("jacobian ", jacobian);
-                        print("Y p hat ", X_thisFrame.p_hat);
-                    }
-                    
-                }
-            }
             if (isnan(w_i)) w_i = 0.f;
-            if (r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg)) {
-                printSetPixel(pixel);
-                print("last frame's p hat: ", temporalBuffer[ind(pixelLastFrame)].X.p_hat);
-                //print("input W_X: ", temporalBuffer[ind(pixelLastFrame)].W_X);
-                print("output p hat: ", r.X.p_hat);
-                //print("output W: ", r.W_X);
-            }
+            r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg);
         }
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;

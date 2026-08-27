@@ -120,9 +120,6 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, float3
         return any(rayData.thp > 0.f);
     }
 
-    printSetPixel(rayData.pixel);
-    print("mi sample failed", 0);
-
     return false;
 }
 
@@ -197,8 +194,6 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
     const uint stopVertex = replayParams.k;
     if (hit.isValid() && stopVertex > 2)
     {
-        printSetPixel(pixel);
-        print("reached retrace main", 0);
         SampleGenerator sg = SampleGenerator(0);
         sg.rng.state = replayParams.seed;
 
@@ -227,8 +222,6 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
         for (uint vertex = 2; vertex <= stopVertex - 1 && !rayData.path.isTerminated(); vertex++)
         {
-            printSetPixel(pixel);
-            print("replay reached: ", vertex);
             // Vertex dependent things
             if (vertex == stopVertex - 1) { //we are about to hit x_k-1 
                 op.replayedThp = rayData.thp; // thp right now is what we want, having just hit x_k-2. Store the info carried by rayData
@@ -387,8 +380,6 @@ void rayGenTemporal()
     op = {};
     if(pixelValidLastFrame) {
         op = tracePath(basePixel, frameDim, temporalInputBuffer[ind(pixelLastFrame)], path); // replay should occur in this frame, but use last frame's k and seed
-        printSetPixel(basePixel);
-        print("temporal input buffer k", temporalInputBuffer[ind(pixelLastFrame)].k);
     }
     op.sourcePixel = basePixel;
     outputBuffer[outputBufferInd + 1] = op;
@@ -430,6 +421,19 @@ void rayGenSpatial()
     PathViewerPath path = {};
     RandomReplayOutput op = {};
 
+    // First shift each spatial neighbor to canonical domain.
+    for (int i = 0; i < kNumSpatialNeighbors; i++) {
+        path = {};
+        op = {};
+        int2 neighborPixel = int2(-1);
+        if (getSpatialNeighbor(basePixel, i, neighborPixel)) {
+            op = tracePath(basePixel, frameDim, inputBuffer[ind(neighborPixel)], path); // using neighbor's seed, from canonical.
+            op.sourcePixel = basePixel;
+            outputBuffer[outputBufferInd] = op;
+        }
+        outputBufferInd++;
+    }
+
     // Replay outputs from here will be used for when we shift canonical sample into neighbors' domains, for mis_denom of canonical sample.
     for(int i = 0; i < kNumSpatialNeighbors; i++)
     {
@@ -443,37 +447,6 @@ void rayGenSpatial()
         outputBuffer[outputBufferInd] = op;
         outputBufferInd++;
     }
-
-    //In each iter of outer loop: 1st shift is shifting neighbor to canonical domain, shifts in inner loop are for shifting the path in canonical domain using neighbor's seed to the other neighbors.
-    for (int i = 0; i < kNumSpatialNeighbors; i++) {
-        path = {};
-        op = {};
-        int2 neighborPixel = int2(-1);
-        if(getSpatialNeighbor(basePixel, i, neighborPixel)) {
-            op = tracePath(basePixel, frameDim, inputBuffer[ind(neighborPixel)], path); // using neighbor's seed, from canonical.
-            op.sourcePixel = basePixel;
-            outputBuffer[outputBufferInd] = op;
-            outputBufferInd++;
-
-            for (int j = 0; j < kNumSpatialNeighbors; j++) {
-                if(i == j) continue; //we didnt leave room in buffer for i == j
-                path = {};
-                op = {};
-                int2 otherNeighbor = int2(-1);
-                if (getSpatialNeighbor(basePixel, j, otherNeighbor)) {
-                    op = tracePath(otherNeighbor, frameDim, inputBuffer[ind(neighborPixel)], path); // using [neighbor]'s seed, from canonical's OTHER spatial neighbors.
-                }
-                op.sourcePixel = otherNeighbor;
-                outputBuffer[outputBufferInd] = op;
-                outputBufferInd++;
-            }
-        } else {
-            // no valid neighbor at this pos
-            outputBufferInd += kNumSpatialNeighbors;
-        }
-    }
-
-
 }
 
 /*

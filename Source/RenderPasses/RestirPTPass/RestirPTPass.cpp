@@ -1035,7 +1035,7 @@ void RestirPTPass::prepareResources(RenderContext* pRenderContext, const RenderD
                 mpReplayInputBuffers[i] = pBuffer;
             }
         }
-        uint maxReplaysPerPixel = mNumSpatialNeighbors * (mNumSpatialNeighbors + 1);
+        uint maxReplaysPerPixel = std::max(2u, mNumSpatialNeighbors * 2); // because we are using pairwise mis for spatial
         if (!mpReplayOutputBuffer || mpReplayOutputBuffer->getElementCount() < maxReplaysPerPixel * elementCount)
         {
             mpReplayOutputBuffer = mpDevice->createStructuredBuffer(var["randomReplayOutput"], maxReplaysPerPixel * elementCount);

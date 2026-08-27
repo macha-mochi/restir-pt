@@ -368,7 +368,7 @@ bool computeShiftedSample(ShiftMappingType shiftType, bool temporalSrc, bool tem
             }
 
             // calc mis weight
-            if (ls.lightType != (uint)NEELightType::Analytic) {
+            if (ls.lightType != (uint)NEELightType::Analytic) { 
                 float bsdfPdf = y_kMinus1_mi.evalPdf(y_sd, ls.dir, true);
                 misWeight = ls.pdf / (bsdfPdf + ls.pdf);
             }

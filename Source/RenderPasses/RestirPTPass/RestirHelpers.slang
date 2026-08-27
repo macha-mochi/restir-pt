@@ -111,19 +111,19 @@ uint getReplayOutputIndex_T(uint2 pixel, uint2 frameDim) {
 
  [pixel]: the "current pixel" we are doing Restir at
 
- The same buffer is used for the random replay outputs for temporal and spatial.
+ The same buffer is used for the random replay outputs for temporal and spatial, but spatial needs more memory.
  This index is for indexing into the spatial scheme of organizing data which is:
-    // canonical -> each spatial neighbor for mis
     // for each neighbor:
     //    neighbor -> this pixel for reservoir update
-    //    neighbor -> each neighbor that is not itself for mis
+    // canonical -> each spatial neighbor for mis
+ For a total of 2 * kNumSpatialNeighbors shifts.
 
   Example with 3 spatial neighbors:
-  | canon -> 0 | canon -> 1 | canon -> 2 || 0 -> canon | 0 -> 1 | 0 -> 2 || 1 -> canon | 1 -> 0 | 1 -> 2 || 2 -> canon | 2 -> 0 | 2 -> 1
-  This will return the index of |canon->0| and the user is expected to add offsets for the rest.
+  | 0 -> canon | 1 -> canon | 2 -> canon || canon -> 0 | canon -> 1 | canon -> 2
+  This will return the index of |0 -> canon| and the user is expected to add offsets for the rest.
 */
 uint getReplayOutputIndex_S(uint2 pixel, uint2 frameDim, uint numNeighbors) {
-    return (pixel.y * frameDim.x + pixel.x) * (numNeighbors * (numNeighbors + 1));
+    return (pixel.y * frameDim.x + pixel.x) * (numNeighbors * 2);
 }
 
 // Returns the index of the [neighborInd]th offset of [pixel], given frameDim and neighbors per pixel
