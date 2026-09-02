@@ -86,6 +86,10 @@ RWStructuredBuffer<PathViewerPath> gPathViewerPathBuffer;
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
 static const uint kMaxBounces = MAX_BOUNCES;
+static const uint kMaxDiffuseBounces = MAX_DIFFUSE_BOUNCES;
+static const uint kMaxSpecularBounces = MAX_SPECULAR_BOUNCES;
+static const uint kMaxTransmissionBounces = MAX_TRANSMISSION_BOUNCES;
+
 static const bool kComputeDirect = COMPUTE_DIRECT;
 static const bool kUseImportanceSampling = USE_IMPORTANCE_SAMPLING;
 static const bool kUseAnalyticLights = USE_ANALYTIC_LIGHTS;
@@ -95,6 +99,7 @@ static const bool kUseEnvBackground = USE_ENV_BACKGROUND;
 static const float3 kDefaultBackgroundColor = float3(0, 0, 0);
 static const float kRayTMax = FLT_MAX;
 static const float kShiftMappingType = SHIFT_MAPPING_TYPE;
+static const float kSpecularRoughnessThreshold = 0.2f; // if a specular vertex is more rough than this, count as diffuse.
 static const float kHybridShiftRoughnessThreshold = 0.2f; //got this value from the OG paper
 
 /**
@@ -177,6 +182,7 @@ struct SampleData{
 struct ScatterRayData
 {
     PathState path; //1 uint of backing data, includes various flags and vertex index. ///< 0 at origin, 1 at primary hit, 2 at first secondary hit, etc.). Max is what fits in 10 bits
+    BounceCounters bounceData; // 1 uint of bounce data (see BounceType)
 
     float3 origin;    ///< Next path segment origin.
     float3 direction; ///< Next path segment direction.
@@ -205,6 +211,7 @@ struct ScatterRayData
         path = {};
         path.setActive();
         path.setVertexIndex(1); // start at 1 bc we only make this struct if it was a alid primary hit
+        bounceData = {};
 
         this.origin = float3(0, 0, 0);
         this.direction = float3(0, 0, 0);
@@ -245,34 +252,30 @@ float3 getPrimaryRayDir(uint2 launchIndex, uint2 launchDim, const Camera camera)
 }
 
 /**
- * Traces a shadow ray towards a light source.
+ * Traces a shadow ray, checks occlusion.
  * @param[in] origin Ray origin for the shadow ray.
  * @param[in] dir Direction from shading point towards the light source (normalized).
  * @param[in] distance Distance to the light source.
  * @return True if light is visible, false otherwise.
  */
-bool traceShadowRay(float3 origin, float3 dir, float distance)
-{
+bool traceShadowRay(float3 origin, float3 dir, float distance) {
     RayDesc ray;
     ray.Origin = origin;
     ray.Direction = dir;
     ray.TMin = 0.f;
     ray.TMax = distance;
 
-    ShadowRayData rayData;
-    rayData.visible = false; // Set to true by miss shader if ray is not terminated before
-    TraceRay(
-        gScene.rtAccel,
-        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
-        0xff /* instanceInclusionMask */,
-        1 /* hitIdx */,
-        rayTypeCount,
-        1 /* missIdx */,
-        ray,
-        rayData
-    );
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+    let rayFlags = RAY_FLAG_NONE; // gets OR'd with the flag passed into rayquery generic
 
-    return rayData.visible;
+    q.TraceRayInline(gScene.rtAccel, rayFlags, 0xff /* instance inclusion mask */, ray);
+
+    while (q.Proceed()) ;
+    if (q.CommittedStatus() == COMMITTED_NOTHING) {
+        return true;
+    } else {
+        return false;
+    }
 }
 
 /**
@@ -305,7 +308,7 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
     rayData.prevSampledLobeType = rayData.sampledLobeType;
 
     // Sample material.
-    BSDFSample bsdfSample;
+    BSDFSample bsdfSample = {};
     if (mi.sample(sd, rayData.sgScatterRays, bsdfSample, kUseImportanceSampling))
     {
         rayData.origin = rayOrigin;
@@ -316,11 +319,20 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         rayData.normal = sd.getOrientedFaceNormal();
         rayData.pdf = bsdfSample.pdf;
         rayData.lobe_pdf = mi.evalLobePdf(sd, bsdfSample.wo, bsdfSample.lobeType);
+        rayData.direction = bsdfSample.wo;
+        rayData.roughness = mi.getProperties(sd).roughness;
         rayData.path.setTransmission(bsdfSample.isLobe(LobeType::Transmission));
         rayData.path.setSpecular(bsdfSample.isLobe(LobeType::Specular));
         rayData.path.setDelta(bsdfSample.isLobe(LobeType::Delta));
-        rayData.direction = bsdfSample.wo;
-        rayData.roughness = mi.getProperties(sd).roughness;
+        if(bsdfSample.isLobe(LobeType::Transmission)) {
+            rayData.bounceData.incrementBounces(BounceType::Transmission);
+        } else {
+            if(bsdfSample.isLobe(LobeType::Diffuse) || rayData.roughness < kSpecularRoughnessThreshold){
+                rayData.bounceData.incrementBounces(BounceType::Diffuse);
+            } else if (bsdfSample.isLobe(LobeType::Specular)) {
+                rayData.bounceData.incrementBounces(BounceType::Specular);
+            }
+        }
 
         rayData.p_hat_thp *= bsdfSample.weight;
         if (kShiftMappingType == (uint)ShiftMappingType::Reconnection && rayData.path.nonDelta()) {
@@ -542,23 +554,6 @@ bool generateLightSample(const PathVertex vertex, const bool sampleUpperHemisphe
     return true;
 }
 
-// HELPER FUNCTIONS
-
-/** Calcs balance heuristic for mis
-        \param[in] n0 Number of samples taken from the first sampling strategy.
-        \param[in] p0 Pdf for the first sampling strategy.
-        \param[in] n1 Number of samples taken from the second sampling strategy.
-        \param[in] p1 Pdf for the second sampling strategy.
-        \return Weight for the contribution from the first strategy (p0).
-    */
-float evalMIS(float n0, float p0, float n1, float p1)
-{
-    // Balance heuristic
-    float q0 = n0 * p0;
-    float q1 = n1 * p1;
-    return q0 / (q0 + q1);
-}
-
 /**
  * Process a hit.
  * Loads the shading data, samples analytic lights and samples a new scatter ray.
@@ -603,7 +598,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
 
             // Compute MIS weight by combining this with BSDF sampling.
             // Note we can assume path.pdf > 0.f since we shouldn't have got here otherwise.
-            misWeight = evalMIS(1, rayData.pdf, 1, lightPdf); //both of these r in solid angle
+            misWeight = rayData.pdf / (rayData.pdf + lightPdf); //both of these r in solid angle
         }
     }
     // update curBSDFSample, which alr contains rc info from genScatterRay
@@ -615,8 +610,11 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
         rayData.sampleData.bsdf_w_i = luminance(rayData.sampleData.bsdf_p_hat); //path pdf is 1 so we dont divide
     }
     
-    // Check whether to terminate based on max depth.
-    if (rayData.path.getVertexIndex() - 2 >= kMaxBounces)
+    // Check whether to terminate based on max depth or bounces. Subtract two because our k[smth]Bounces are for indirect hits (x2 and beyond).
+    if (rayData.path.getVertexIndex() - 2 >= kMaxBounces
+     || rayData.bounceData.getBounces(BounceType::Diffuse) >= kMaxDiffuseBounces
+     || rayData.bounceData.getBounces(BounceType::Specular) >= kMaxSpecularBounces
+     || rayData.bounceData.getBounces(BounceType::Transmission) >= kMaxTransmissionBounces)
     {
         rayData.path.terminate();
         return;
@@ -702,7 +700,7 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
             if (ls.lightType != (uint)NEELightType::Analytic)
             {
                 float scatterPdf = mi.evalPdf(sd, ls.dir, true); // true because we are using BSDF sampling
-                misWeight = evalMIS(1, ls.pdf, 1, scatterPdf);
+                misWeight = ls.pdf / (ls.pdf + scatterPdf);
             }
 
             float3 weight = mi.eval(sd, ls.dir, rayData.sg); // f * cos
@@ -889,7 +887,7 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                         curNEESample.postRCSeed = shiftContext.x_kPlus1_seed; //this is the seed to replay generate scatter ray originating at x_(k+1)
                     }
                 }
-                
+
                 if (r.updateReservoir(curNEESample, curNEESample.w_i, 1, sg)) {
                     if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
                         r.X.k = 2;
@@ -1051,7 +1049,7 @@ void scatterMiss(inout ScatterRayData rayData)
 
             // Compute MIS weight by combining this with BSDF sampling.
             // Note we can assume rayData.pdf > 0.f since we shouldn't have got here otherwise. it holds the pdf that the bsdf sampler chose this dir
-            misWeight = evalMIS(1, rayData.pdf, 1, lightPdf); // both of these r in solid angle
+            misWeight = rayData.pdf / (rayData.pdf + lightPdf); // both of these r in solid angle
         }
         if (kShiftMappingType == (uint)ShiftMappingType::Reconnection) {
             rayData.sampleData.bsdf_p_hat = bsdf_p_hat;
@@ -1202,9 +1200,9 @@ void rayGen()
     Reservoir r = tracePath(pixel, frameDim);
     gReservoirBuffer[pixelInd] = r;
 
-    #if IS_LAST_PASS
+#if 1 //IS_LAST_PASS
 // we calculate the final color here
-    outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
+    //outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
     #endif
 }
 

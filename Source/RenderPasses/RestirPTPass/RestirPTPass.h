@@ -87,7 +87,15 @@ private:
     // Configuration
 
     /// Max number of indirect bounces (0 = none).
-    uint mMaxBounces = 3;
+    const uint MAX_BOUNCES = 128;
+    struct
+    {
+        uint maxSurfaceBounces = 5;
+        uint maxDiffuseBounces = 3;
+        uint maxSpecularBounces = 3;
+        uint maxTransmissionBounces = 5;
+        float specularRoughnessThreshold = 0.2f;
+    } mPathParams;
     /// Compute direct illumination (otherwise indirect only).
     bool mComputeDirect = true;
     /// Use importance sampling for materials.
@@ -95,7 +103,7 @@ private:
     /// Type of shift mapping used
     ShiftMappingType mShiftMappingType = ShiftMappingType::Hybrid;
     /// Whether to do spatial reuse
-    bool mUseSpatialReuse = false;
+    bool mUseSpatialReuse = true;
     /// Number of spatial neighbors per pixel
     uint mNumSpatialNeighbors = 3;
     ///  Radius that spatial neighbors are picked from in a pixel
@@ -154,6 +162,7 @@ private:
     ref<Buffer> mpSpatialDebugBuffer;
 
     bool mUsePathViewer = false; // if true, the renderer is paused so you can click around pixels on that frame
+    uint mNumPathViewerVertices = 5;
     uint2 mMousePixelPos;
     ref<Buffer> mpPathDataBuffer;
     ref<Buffer> mpReplayPathDataBuffer;

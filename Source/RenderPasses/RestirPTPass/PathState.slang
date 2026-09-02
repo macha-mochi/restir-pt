@@ -108,3 +108,38 @@ struct PathState {
     [mutating] void decrementVertexIndex() { flagsAndVertexIndex -= 1; }
 }
 
+/** Bounce types. We keep separate counters for all of these.
+ */
+enum class BounceType
+{
+    Diffuse = 0,      ///< Diffuse reflection.
+    Specular = 1,     ///< Specular reflection (including delta).
+    Transmission = 2, ///< Transmission (all kinds).
+};
+struct BounceCounters
+{
+    uint bounceCounters;
+
+    __init() {
+        bounceCounters = 0;
+    }
+
+    uint getBounces(BounceType type)
+    {
+        const uint shift = (uint)type << 3;
+        return (bounceCounters >> shift) & 0xff;
+    }
+    [mutating] void setBounces(BounceType type, uint bounces)
+    {
+        const uint shift = (uint)type << 3;
+        bounceCounters = (bounceCounters & ~((uint)0xff << shift)) | ((bounces & 0xff) << shift);
+    }
+
+    [mutating] void incrementBounces(BounceType type)
+    {
+        const uint shift = (uint)type << 3;
+        // We assume that bounce counters cannot overflow.
+        bounceCounters += (1 << shift);
+    }
+}
+

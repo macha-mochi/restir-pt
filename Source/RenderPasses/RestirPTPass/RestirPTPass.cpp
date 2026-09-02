@@ -101,7 +101,7 @@ void RestirPTPass::parseProperties(const Properties& props)
     for (const auto& [key, value] : props)
     {
         if (key == kMaxBounces)
-            mMaxBounces = value;
+            mPathParams.maxSurfaceBounces = value;
         else if (key == kComputeDirect)
             mComputeDirect = value;
         else if (key == kUseImportanceSampling)
@@ -116,7 +116,7 @@ void RestirPTPass::parseProperties(const Properties& props)
 Properties RestirPTPass::getProperties() const
 {
     Properties props;
-    props[kMaxBounces] = mMaxBounces;
+    props[kMaxBounces] = mPathParams.maxSurfaceBounces;
     props[kComputeDirect] = mComputeDirect;
     props[kUseImportanceSampling] = mUseImportanceSampling;
     props[kShiftMappingType] = mShiftMappingType;
@@ -248,7 +248,11 @@ void RestirPTPass::GenerateInitialCandidates(RenderContext* pRenderContext, cons
 {
     // Specialize program.
     // These defines should not modify the program vars. Do not trigger program vars re-creation.
-    mTracer.pProgram->addDefine("MAX_BOUNCES", std::to_string(mMaxBounces));
+    mTracer.pProgram->addDefine("MAX_BOUNCES", std::to_string(mPathParams.maxSurfaceBounces));
+    mTracer.pProgram->addDefine("MAX_DIFFUSE_BOUNCES", std::to_string(mPathParams.maxDiffuseBounces));
+    mTracer.pProgram->addDefine("MAX_SPECULAR_BOUNCES", std::to_string(mPathParams.maxSpecularBounces));
+    mTracer.pProgram->addDefine("MAX_TRANSMISSION_BOUNCES", std::to_string(mPathParams.maxTransmissionBounces));
+
     mTracer.pProgram->addDefine("COMPUTE_DIRECT", mComputeDirect ? "1" : "0");
     mTracer.pProgram->addDefine("USE_IMPORTANCE_SAMPLING", mUseImportanceSampling ? "1" : "0");
     mTracer.pProgram->addDefine("USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0");
@@ -318,6 +322,8 @@ void RestirPTPass::GenerateInitialCandidates(RenderContext* pRenderContext, cons
         mpCandidateGenDebugBuffer->setName("Restir Candidate Debug Buffer");
         var["debugBuffer"] = mpCandidateGenDebugBuffer;
     }
+
+    mpScene->bindShaderData(var["gScene"]); // binds the Scene parameter block (as seen in Scene.slang w all the vertex and geometry buffers
 
     mpPixelDebug->prepareProgram(mTracer.pProgram, var);
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
@@ -602,8 +608,29 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
 void RestirPTPass::renderUI(Gui::Widgets& widget) {
     bool dirty = false;
 
-    dirty |= widget.var("Max bounces", mMaxBounces, 0u, 1u << 16);
-    widget.tooltip("Maximum path length for indirect illumination.\n0 = direct only\n1 = one indirect bounce etc.", true);
+    if (widget.var("Max surface bounces", mPathParams.maxSurfaceBounces, 0u, MAX_BOUNCES))
+    {
+        // Allow users to change the max surface bounce parameter in the UI to clamp all other surface bounce parameters.
+        mPathParams.maxDiffuseBounces = std::min(mPathParams.maxDiffuseBounces, mPathParams.maxSurfaceBounces);
+        mPathParams.maxSpecularBounces = std::min(mPathParams.maxSpecularBounces, mPathParams.maxSurfaceBounces);
+        mPathParams.maxTransmissionBounces = std::min(mPathParams.maxTransmissionBounces, mPathParams.maxSurfaceBounces);
+        dirty = true;
+    }
+    widget.tooltip(
+        "Maximum number of surface bounces (diffuse + specular + transmission).\n"
+        "Note that specular reflection events from a material with a roughness greater than specularRoughnessThreshold (0.2f) are also classified "
+        "as diffuse events.\n"
+        "0 = direct only, 1 = one indirect bounce etc"
+    );
+
+    dirty |= widget.var("Max diffuse bounces", mPathParams.maxDiffuseBounces, 0u, MAX_BOUNCES);
+    widget.tooltip("Maximum number of diffuse bounces.\n0 = direct only\n1 = one indirect bounce etc.");
+
+    dirty |= widget.var("Max specular bounces", mPathParams.maxSpecularBounces, 0u, MAX_BOUNCES);
+    widget.tooltip("Maximum number of specular bounces.\n0 = direct only\n1 = one indirect bounce etc.");
+
+    dirty |= widget.var("Max transmission bounces", mPathParams.maxTransmissionBounces, 0u, MAX_BOUNCES);
+    widget.tooltip("Maximum number of transmission bounces.\n0 = no transmission\n1 = one transmission bounce etc.");
 
     dirty |= widget.checkbox("Evaluate direct illumination", mComputeDirect);
     widget.tooltip("Compute direct illumination.\nIf disabled only indirect is computed (when max bounces > 0).", true);
@@ -612,10 +639,10 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
     widget.tooltip("Use importance sampling for materials", true);
 
     dirty |= widget.checkbox("Temporal reuse", mUseTemporalReuse);
-    widget.tooltip("Use temporal reuse for Restir resampling", true);
+    widget.tooltip("Use temporal reuse for ReSTIR", true);
 
     dirty |= widget.checkbox("Spatial reuse", mUseSpatialReuse);
-    widget.tooltip("Use spatial reuse for Restir resampling", true);
+    widget.tooltip("Use spatial reuse for ReSTIR", true);
 
     if (mUseSpatialReuse)
     {
@@ -626,7 +653,14 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
     dirty |= widget.dropdown("Shift mapping type", mShiftMappingType);
     widget.tooltip("What type of shift mapping to use for spatial/temporal reuse.", true);
 
-    dirty |= widget.checkbox("Pause renderer and use path viewer", mUsePathViewer);
+    // Debugging UI
+
+    if (widget.checkbox("Pause renderer and use path viewer", mUsePathViewer))
+    {
+        dirty = true;
+        dirty |= widget.var("Max vertices to store", mNumPathViewerVertices, 1u, 5u);
+        widget.tooltip("Number of vertices (starting x1) that path viewer will store. Capped at 5 currently.", true);
+    }
     widget.tooltip("Whether we should pause the renderer and allow user to click a pixel to display its final path in space", true);
 
     dirty |= widget.checkbox("Visualize path info", mVisualizePathInfo);
@@ -729,11 +763,13 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         desc.setMaxAttributeSize(mpScene->getRaytracingMaxAttributeSize());
         desc.setMaxTraceRecursionDepth(kMaxRecursionDepth);
 
-        mTracer.pBindingTable = RtBindingTable::create(2, 2, mpScene->getGeometryCount());
+        mTracer.pBindingTable = RtBindingTable::create(1, 1, mpScene->getGeometryCount());
         auto& sbt = mTracer.pBindingTable;
         sbt->setRayGen(desc.addRayGen("rayGen"));
         sbt->setMiss(0, desc.addMiss("scatterMiss"));
+        #if 0
         sbt->setMiss(1, desc.addMiss("shadowMiss"));
+        #endif
 
         if (mpScene->hasGeometryType(Scene::GeometryType::TriangleMesh))
         {
@@ -742,9 +778,11 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
                 mpScene->getGeometryIDs(Scene::GeometryType::TriangleMesh),
                 desc.addHitGroup("scatterTriangleMeshClosestHit", "scatterTriangleMeshAnyHit")
             );
+            #if 0
             sbt->setHitGroup(
                 1, mpScene->getGeometryIDs(Scene::GeometryType::TriangleMesh), desc.addHitGroup("", "shadowTriangleMeshAnyHit")
             );
+            #endif
         }
 
         if (mpScene->hasGeometryType(Scene::GeometryType::DisplacedTriangleMesh))
@@ -754,11 +792,13 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
                 mpScene->getGeometryIDs(Scene::GeometryType::DisplacedTriangleMesh),
                 desc.addHitGroup("scatterDisplacedTriangleMeshClosestHit", "", "displacedTriangleMeshIntersection")
             );
+            #if 0
             sbt->setHitGroup(
                 1,
                 mpScene->getGeometryIDs(Scene::GeometryType::DisplacedTriangleMesh),
                 desc.addHitGroup("", "", "displacedTriangleMeshIntersection")
             );
+            #endif
         }
 
         mTracer.pProgram = Program::create(mpDevice, desc, mpScene->getSceneDefines());
