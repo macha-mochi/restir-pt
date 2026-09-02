@@ -767,9 +767,6 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
         auto& sbt = mTracer.pBindingTable;
         sbt->setRayGen(desc.addRayGen("rayGen"));
         sbt->setMiss(0, desc.addMiss("scatterMiss"));
-        #if 0
-        sbt->setMiss(1, desc.addMiss("shadowMiss"));
-        #endif
 
         if (mpScene->hasGeometryType(Scene::GeometryType::TriangleMesh))
         {
@@ -778,11 +775,6 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
                 mpScene->getGeometryIDs(Scene::GeometryType::TriangleMesh),
                 desc.addHitGroup("scatterTriangleMeshClosestHit", "scatterTriangleMeshAnyHit")
             );
-            #if 0
-            sbt->setHitGroup(
-                1, mpScene->getGeometryIDs(Scene::GeometryType::TriangleMesh), desc.addHitGroup("", "shadowTriangleMeshAnyHit")
-            );
-            #endif
         }
 
         if (mpScene->hasGeometryType(Scene::GeometryType::DisplacedTriangleMesh))
@@ -792,13 +784,6 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
                 mpScene->getGeometryIDs(Scene::GeometryType::DisplacedTriangleMesh),
                 desc.addHitGroup("scatterDisplacedTriangleMeshClosestHit", "", "displacedTriangleMeshIntersection")
             );
-            #if 0
-            sbt->setHitGroup(
-                1,
-                mpScene->getGeometryIDs(Scene::GeometryType::DisplacedTriangleMesh),
-                desc.addHitGroup("", "", "displacedTriangleMeshIntersection")
-            );
-            #endif
         }
 
         mTracer.pProgram = Program::create(mpDevice, desc, mpScene->getSceneDefines());

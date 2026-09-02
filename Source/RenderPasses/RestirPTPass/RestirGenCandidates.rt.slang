@@ -1064,13 +1064,6 @@ void scatterMiss(inout ScatterRayData rayData)
     }
 }
 
-[shader("miss")]
-void shadowMiss(inout ShadowRayData rayData)
-{
-    // The miss shader is executed if the ray misses all geometry. Mark as visible.
-    rayData.visible = true;
-}
-
 //
 // Shader entry points for TriangleMesh hit groups.
 //
@@ -1094,17 +1087,6 @@ void scatterTriangleMeshClosestHit(inout ScatterRayData rayData, BuiltInTriangle
     triangleHit.primitiveIndex = PrimitiveIndex();
     triangleHit.barycentrics = attribs.barycentrics;
     handleHit(HitInfo(triangleHit), rayData);
-}
-
-[shader("anyhit")]
-void shadowTriangleMeshAnyHit(inout ShadowRayData rayData, BuiltInTriangleIntersectionAttributes attribs)
-{
-    // Alpha test for non-opaque geometry.
-    GeometryInstanceID instanceID = getGeometryInstanceID();
-    VertexData v = getVertexData(instanceID, PrimitiveIndex(), attribs);
-    const uint materialID = gScene.getMaterialID(instanceID);
-    if (gScene.materials.alphaTest(v, materialID, 0.f))
-        IgnoreHit();
 }
 
 //
@@ -1132,57 +1114,6 @@ void scatterDisplacedTriangleMeshClosestHit(inout ScatterRayData rayData, Displa
     displacedTriangleHit.barycentrics = attribs.barycentrics;
     displacedTriangleHit.displacement = attribs.displacement;
     handleHit(HitInfo(displacedTriangleHit), rayData);
-}
-
-//
-// Shader entry points for Curve hit groups.
-//
-
-[shader("intersection")]
-void curveIntersection()
-{
-    const Ray ray = Ray(WorldRayOrigin(), WorldRayDirection(), RayTMin(), RayTCurrent());
-    CurveIntersector::Attribs attribs;
-    float t;
-    if (CurveIntersector::intersect(ray, getGeometryInstanceID(), PrimitiveIndex(), attribs, t))
-    {
-        ReportHit(t, 0, attribs);
-    }
-}
-
-[shader("closesthit")]
-void scatterCurveClosestHit(inout ScatterRayData rayData, CurveIntersector::Attribs attribs)
-{
-    CurveHit curveHit;
-    curveHit.instanceID = getGeometryInstanceID();
-    curveHit.primitiveIndex = PrimitiveIndex();
-    curveHit.barycentrics = attribs.barycentrics;
-    handleHit(HitInfo(curveHit), rayData);
-}
-
-//
-// Shader entry points for SDFGrid hit groups.
-//
-
-[shader("intersection")]
-void sdfGridIntersection()
-{
-    const Ray ray = Ray(WorldRayOrigin(), WorldRayDirection(), RayTMin(), RayTCurrent());
-    SDFGridHitData sdfGridHitData;
-    float t;
-    if (SDFGridIntersector::intersect(ray, getGeometryInstanceID(), PrimitiveIndex(), sdfGridHitData, t))
-    {
-        ReportHit(t, 0, sdfGridHitData);
-    }
-}
-
-[shader("closesthit")]
-void scatterSdfGridClosestHit(inout ScatterRayData rayData, SDFGridHitData sdfGridHitData)
-{
-    SDFGridHit sdfGridHit;
-    sdfGridHit.instanceID = getGeometryInstanceID();
-    sdfGridHit.hitData = sdfGridHitData;
-    handleHit(HitInfo(sdfGridHit), rayData);
 }
 
 //
