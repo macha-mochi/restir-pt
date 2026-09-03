@@ -589,8 +589,8 @@ Device::Device(const Desc& desc) : mDesc(desc)
 
         FALCOR_MAKE_SMART_COM_PTR(ID3D12InfoQueue);
         ID3D12InfoQueuePtr pInfoQueue;
-        //if (pD3D12Device && SUCCEEDED(pD3D12Device->QueryInterface(IID_PPV_ARGS(&pInfoQueue))))
-        //{
+        if (pD3D12Device && SUCCEEDED(pD3D12Device->QueryInterface(IID_PPV_ARGS(&pInfoQueue))))
+        {
             pD3D12Device->QueryInterface(IID_PPV_ARGS(&pInfoQueue));
             D3D12_MESSAGE_ID hideMessages[] = {
                 D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
@@ -603,7 +603,7 @@ Device::Device(const Desc& desc) : mDesc(desc)
 
             // Break on DEVICE_REMOVAL_PROCESS_AT_FAULT
             pInfoQueue->SetBreakOnID(D3D12_MESSAGE_ID_DEVICE_REMOVAL_PROCESS_AT_FAULT, true);
-        //}
+        }
     }
 #endif
 
