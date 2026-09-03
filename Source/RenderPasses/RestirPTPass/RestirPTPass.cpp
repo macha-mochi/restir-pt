@@ -45,6 +45,7 @@ const char kTemporalComputeShaderFile[] = "RenderPasses/RestirPTPass/TemporalReu
 const char kRetracePathsShaderFile[] = "RenderPasses/RestirPTPass/RetracePaths.rt.slang";
 const char kPathViewerShaderFile[] = "RenderPasses/RestirPTPass/PathViewer.cs.slang";
 const char kVisualizePathsShaderFile[] = "RenderPasses/RestirPTPass/VisualizePaths.cs.slang";
+const char kCalcDuplicationPassShaderFile[] = "RenderPasses/RestirPTPass/CalcDuplication.cs.slang";
 
 //CANDIDATE GENERATION SETTINGS
 // Ray tracing settings that affect the traversal stack size.
@@ -235,6 +236,10 @@ void RestirPTPass::execute(RenderContext* pRenderContext, const RenderData& rend
     if (mVisualizePathInfo)
     {
         VisualizePathsPass(pRenderContext, renderData, mInputReservoirID);
+    }
+    if (mUseDuplicationMap)
+    {
+        CalculateDuplicationPass(pRenderContext, renderData);
     }
     std::swap(mInputReservoirID, mTemporalReservoirID);
     std::swap(mReplayInputID, mTemporalReplayInputID);
@@ -469,6 +474,10 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     program->addDefine("USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0");
     program->addDefine("USE_EMISSIVE_LIGHTS", mpScene->useEmissiveLights() ? "1" : "0");
     program->addDefine("USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0");
+    if (isTemporal)
+    {
+        program->addDefine("USE_DUPLICATION_MAP", mUseDuplicationMap ? "1" : "0");
+    }
 
     auto var = pPass->getRootVar();
     var["CB"]["gFrameCount"] = mFrameCount;
@@ -494,6 +503,10 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
         if (mpTemporalViewDir)
         {
             passVar["temporalViewW"] = mpTemporalViewDir;
+        }
+        if (mUseDuplicationMap)
+        {
+            passVar["duplicationScoreBuffer"] = mpDuplicationScoreBuffer;
         }
     }
     else
@@ -551,6 +564,32 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
     pPass->execute(pRenderContext, targetDim.x, targetDim.y);
 }
 
+void RestirPTPass::CalculateDuplicationPass(RenderContext* pRenderContext, const RenderData& renderData)
+{
+    if (!mpCalculateDuplicationPass) //create compute pass if it doesnt exist yet
+    {
+        DefineList defines;
+        ProgramDesc desc;
+        desc.addShaderLibrary(kCalcDuplicationPassShaderFile);
+        desc.csEntry("main");
+        mpCalculateDuplicationPass = ComputePass::create(mpDevice, desc, defines);
+    }
+
+    auto var = mpCalculateDuplicationPass->getRootVar();
+    var["CB"]["gOutputDimensions"] = targetDim;
+    var["gSeedBuffer"] = mpReplayInputBuffers[mReplayInputID];
+    uint32_t elementCount = targetDim.x * targetDim.y;
+    if (!mpDuplicationScoreBuffer || mpDuplicationScoreBuffer->getElementCount() < elementCount)
+    {
+        mpDuplicationScoreBuffer = mpDevice->createStructuredBuffer(var["gDuplicationScoreBuffer"], elementCount);
+        mpDuplicationScoreBuffer->setName("Restir Duplication Score Buffer");
+        var["gDuplicationScoreBuffer"] = mpDuplicationScoreBuffer;
+    }
+
+    mpPixelDebug->prepareProgram(mpCalculateDuplicationPass->getProgram(), var);
+    mpCalculateDuplicationPass->execute(pRenderContext, targetDim.x, targetDim.y);
+}
+
 void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderData& renderData, bool alsoViewReplayPaths = false)
 {
     if (!mpPathViewerPass) // create the compute pass for path viewer if it doesn't exist yet
@@ -605,7 +644,8 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
     }
 }
 
-void RestirPTPass::renderUI(Gui::Widgets& widget) {
+void RestirPTPass::renderUI(Gui::Widgets& widget)
+{
     bool dirty = false;
 
     if (widget.var("Max surface bounces", mPathParams.maxSurfaceBounces, 0u, MAX_BOUNCES))
@@ -618,7 +658,8 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
     }
     widget.tooltip(
         "Maximum number of surface bounces (diffuse + specular + transmission).\n"
-        "Note that specular reflection events from a material with a roughness greater than specularRoughnessThreshold (0.2f) are also classified "
+        "Note that specular reflection events from a material with a roughness greater than specularRoughnessThreshold (0.2f) are also "
+        "classified "
         "as diffuse events.\n"
         "0 = direct only, 1 = one indirect bounce etc"
     );
@@ -652,6 +693,9 @@ void RestirPTPass::renderUI(Gui::Widgets& widget) {
 
     dirty |= widget.dropdown("Shift mapping type", mShiftMappingType);
     widget.tooltip("What type of shift mapping to use for spatial/temporal reuse.", true);
+
+    dirty |= widget.checkbox("Duplication map decorrelation", mUseDuplicationMap);
+    widget.tooltip("Decorrelate samples using duplication maps from ReSTIR PT Enhanced", true);
 
     // Debugging UI
 
@@ -877,7 +921,8 @@ void RestirPTPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSc
              {"IS_LAST_PASS", "0"},
              {"USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0"},
             {"USE_EMISSIVE_LIGHTS", mpScene->useEmissiveLights() ? "1" : "0"},
-             {"USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0"}}
+             {"USE_ENV_LIGHT", mpScene->useEnvLight() ? "1" : "0"},
+             {"USE_DUPLICATION_MAP", mUseDuplicationMap ? "1" : "0"}}
         );
     }
 }

@@ -20,12 +20,18 @@ void main(uint3 threadID: SV_DispatchThreadID)
 
     PathState path = gReservoirBuffer[pixelInd].X.path;
     uint k = gReservoirBuffer[pixelInd].X.k;
+    uint seed = gReservoirBuffer[pixelInd].X.seed;
     uint len = path.getVertexIndex();
+
+    /*uint r = ((seed >> 16) & 0xFF);
+    uint g = ((seed >> 8) & 0xFF);
+    uint b = ((seed) & 0xFF);
+    float4 color = float4(r / 256.f, g / 256.f, b / 256.f, 1);*/
 
     float4 color = float4(0, 0, 0, 1);
     switch (len) {
     case 0:
-        //color = float4(1, 0, 1, 1);
+        color = float4(1, 0, 1, 1);
         break;
     case 2:
         color = float4(1, 0, 0, 1);
@@ -43,28 +49,5 @@ void main(uint3 threadID: SV_DispatchThreadID)
         color = float4(0, 0, 0, 1);
         break;
     }
-    /*if (path.isBSDFSampled()) {
-        if (path.sampledEnvMap()) {
-            if (len == 3 && k == 3) color = float4(1, 0, 0, 1);
-        } else if (path.sampledEmissive()) {
-            //color = float4(1, 1, 0, 1);
-        } else {
-            //color = float4(1, 1, 1, 1);
-        }
-        //color = float4(1, 0, 0, 1);
-    } else if (path.isNEESampled()) {
-        //color = float4(0, 1, 0, 1);
-        /*if (path.sampledEnvMap()) {
-            color = float4(0, 0.5, 0, 1);
-        } else if (path.sampledEmissive()) {
-            color = float4(0.5, 0, 1, 1);
-        } else if (path.sampledAnalytic()) {
-            color = float4(0.5, 0, 0, 1);
-        } else {
-            color = float4(1, 1, 1, 1);
-        }
-    } else {
-        //color = float4(0, 0, 1, 1);
-    }*/
     gOutputColor[pixel] = color;
 }

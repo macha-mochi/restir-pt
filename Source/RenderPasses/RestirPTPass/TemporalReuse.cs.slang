@@ -16,6 +16,7 @@ struct DebugData
     }
 };
 
+static const bool kUseDuplicationMap = USE_DUPLICATION_MAP;
 static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
 
 cbuffer CB
@@ -38,6 +39,7 @@ struct TemporalReusePass {
     StructuredBuffer<Reservoir> temporalBuffer;
     StructuredBuffer<float3> di_bgBuffer;
     StructuredBuffer<RandomReplayOutput> replayedDataBuffer;
+    StructuredBuffer<float> duplicationScoreBuffer; // only used if USE_DUPLICATION_MAP true
     // Outputs / modified things
     RWStructuredBuffer<RandomReplayInput> replayedInputBuffer; // we need to write the results of this pass to this buffer.
     RWStructuredBuffer<Reservoir> outputBuffer;
@@ -59,10 +61,17 @@ struct TemporalReusePass {
         return pixel.y * gOutputDimensions.x + pixel.x;
     }
 
+    /**
+    Gets modified c cap from the duplication map score using an assumed valid pixelLastFrame.
+    */
+    uint getModifiedCCap(uint2 pixelLastFrame){
+        float d = duplicationScoreBuffer[ind(pixelLastFrame)];
+
+        return (uint)(20 + (1 - 20) * pow(d, 0.1)); //usising default c cap = 20, min c cap = 1, alpha = 0.1
+    }
+
     void execute(uint2 pixel) {
         if (any(pixel >= gOutputDimensions)) return; // return if oob
-
-        outputColor[pixel] = float4(0, 0, 0, 1);
 
         Reservoir r = {}; // start w blank reservoir
 
@@ -171,6 +180,9 @@ struct TemporalReusePass {
 
             if (isnan(w_i)) w_i = 0.f;
             r.updateReservoir(X_thisFrame, w_i, temporalBuffer[ind(pixelLastFrame)].c, sg);
+            if(kUseDuplicationMap){
+                r.c = min(r.c, getModifiedCCap(pixelLastFrame)); //we only do it here bc if there's no valid temporal pos, there's not going to be much correlation
+            }
         }
         outputBuffer[ind(pixel)] = r;
         debugBuffer[ind(pixel)] = debugData;
@@ -179,6 +191,7 @@ struct TemporalReusePass {
 
         #if IS_LAST_PASS
         // If this is the last pass, should calculate the output color
+            //outputColor[pixel] = float4(5 * duplicationScoreBuffer[ind(pixel)], 0, 0, 1); // to visualize duplication buffer.
            outputColor[pixel] = float4(r.X.p_hat * r.W_X + di_bgBuffer[ind(pixel)], 1);
         #endif
 

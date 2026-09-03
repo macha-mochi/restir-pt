@@ -75,6 +75,7 @@ private:
     void PathReusePass(RenderContext* pRenderContext, const RenderData& renderData, bool isTemporal);
     void GenSpatialOffsetsPass(RenderContext* pRenderContext, const RenderData& renderData);
     void VisualizePathsPass(RenderContext* pRenderContext, const RenderData& renderData, uint bufferInd);
+    void CalculateDuplicationPass(RenderContext* pRenderContext, const RenderData& renderData);
 
     // Internal state
 
@@ -155,6 +156,11 @@ private:
     ref<ComputePass> mpTemporalReusePass; /// Temporal resampling.
     ref<ComputePass> mpGenSpatialOffsetsPass; /// Generates spatial offsets. Maybe impl reuse textures in future?
     ref<ComputePass> mpSpatialReusePass; /// Spatial resampling.
+
+    //Duplication map
+    bool mUseDuplicationMap = false;
+    ref<ComputePass> mpCalculateDuplicationPass;
+    ref<Buffer> mpDuplicationScoreBuffer;
 
     //Debugging resources
     ref<Buffer> mpCandidateGenDebugBuffer;

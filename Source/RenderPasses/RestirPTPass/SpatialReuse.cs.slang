@@ -76,8 +76,6 @@ struct SpatialReusePass {
     void execute(uint2 pixel) {
         if (any(pixel >= gOutputDimensions)) return; // return if oob
 
-        outputColor[pixel] = float4(0, 0, 0, 1);
-
         Reservoir r = {};
         DebugData debugData = {};
 
