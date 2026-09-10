@@ -6,15 +6,6 @@ import Utils.Sampling.SampleGenerator;
 import Scene.Raytracing;
 import Utils.Debug.PixelDebug;
 
-struct DebugData
-{
-    float dummy;
-
-    __init(){
-        dummy = 1.f;
-    }
-};
-
 static const uint kNumSpatialNeighbors = NUM_SPATIAL_NEIGHBORS;
 static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
 
@@ -40,9 +31,6 @@ struct SpatialReusePass {
     RWStructuredBuffer<RandomReplayInput> replayedInputBuffer;
     RWStructuredBuffer<Reservoir> outputBuffer;
     RWTexture2D<float4> outputColor;
-
-    // Debug
-    RWStructuredBuffer<DebugData> debugBuffer;
 
     uint ind(uint2 pixel) {
         return pixel.y * gOutputDimensions.x + pixel.x;
@@ -77,7 +65,6 @@ struct SpatialReusePass {
         if (any(pixel >= gOutputDimensions)) return; // return if oob
 
         Reservoir r = {};
-        DebugData debugData = {};
 
         SampleGenerator sg = SampleGenerator(pixel, gFrameCount * 4 + 3);
         // Advance the generator to the first available dimension.
@@ -185,6 +172,7 @@ struct SpatialReusePass {
                 }
                 float num = c_c * p_hat_c;
                 float den = non_canonical_c_sum * p_from_j + num;
+
                 m_c += ((float)c_j / (c_c + non_canonical_c_sum)) * num / den;
             }
 
@@ -195,7 +183,6 @@ struct SpatialReusePass {
         r.updateReservoir(inputBuffer[ind(pixel)].X, w_i, inputBuffer[ind(pixel)].c, sg);
 
         outputBuffer[ind(pixel)] = r;
-        debugBuffer[ind(pixel)] = debugData;
         replayedInputBuffer[ind(pixel)].k = r.X.k;
         replayedInputBuffer[ind(pixel)].seed = r.X.seed;
 

@@ -11,12 +11,6 @@ uniform float4x4 gViewProjMatNoJitter;
 // Outputs
 RWTexture2D<float4> gOutputColor;
 
-RWStructuredBuffer<DebugData> debugBuffer;
-
-struct DebugData {
-    float A;
-}
-
 /**
  converts posW to a uint2 in pixel coordinates. [0, 0] is top left, (1920, 1080) is bottom right.
 
@@ -66,7 +60,6 @@ void drawPaths(uint3 threadID: SV_DispatchThreadID) {
     uint pixelInd = pixel.y * dims.x + pixel.x;
 
     float4 pathColor = float4(1, 1, 1, 1);
-    DebugData d = {};
     for (int i = 0; i < gPathDataBuffer[mouseBufferInd].numNonCameraVertices - 1; i++) {
         uint2 p0 = worldToScreen(gPathDataBuffer[mouseBufferInd].vertices[i], dims);
         uint2 p1 = worldToScreen(gPathDataBuffer[mouseBufferInd].vertices[i + 1], dims);

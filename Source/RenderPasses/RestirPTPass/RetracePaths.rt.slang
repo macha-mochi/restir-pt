@@ -10,6 +10,8 @@ import PathState;
 import RestirHelpers;
 import Utils.Debug.PixelDebug;
 
+#define USE_SER 0 //as of 9/10/26, adding SER actually makes it slower :(
+
 cbuffer CB
 {
     uint gFrameCount; // Frame count since scene was loaded.
@@ -39,6 +41,9 @@ static const float kHybridShiftRoughnessThreshold = 0.2f; // got this value from
 struct ScatterRayData
 {
     uint2 pixel;
+    #if USE_SER
+    uint k;
+    #endif
 
     PathState path;
     float3 thp;       ///< The replayed thp, in PSS parametrization (product of "f/p" terms)
@@ -56,6 +61,9 @@ struct ScatterRayData
 
     __init(SampleGenerator sg) {
         pixel = uint2(0);
+        #if USE_SER
+        k = 0;
+        #endif
 
         thp = float3(1.f);
         origin = float3(0.f);
@@ -85,7 +93,18 @@ void traceScatterRay(inout ScatterRayData rayData)
     ray.TMax = kRayTMax;
 
     uint rayFlags = 0; // TODO: Set cull mode from the app
+#if USE_SER
+    HitObject hit = HitObject::TraceRay(gScene.rtAccel, rayFlags, 0xff /* instanceInclusionMask */, 0 /* hitIdx */, rayTypeCount, 0 /* missIdx */, ray, rayData);
+
+    uint terminateEarly = rayData.path.getVertexIndex() + 1 == rayData.k; 
+
+    // Reorder and invoke closest hit or miss shader.
+    ReorderThread(hit, terminateEarly, 1);
+    HitObject::Invoke(gScene.rtAccel, hit, rayData);
+
+#else
     TraceRay(gScene.rtAccel, rayFlags, 0xff /* instanceInclusionMask */, 0 /* hitIdx */, rayTypeCount, 0 /* missIdx */, ray, rayData);
+#endif
 }
 
 /**
@@ -130,23 +149,22 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     // Load shading data.
     ShadingData sd = loadShadingData(hit, rayData.origin, rayData.direction);
 
-    // Create material instance.
-    let lod = ExplicitLodTextureSampler(0.f);
-    let mi = gScene.materials.getMaterialInstance(sd, lod);
-
     // Save info for hybrid shift mapping
     float3 x_kMinus1 = rayData.origin;
     float kMinus1_to_k_pdf = rayData.pdf;
     float3 normalAt_kMinus1 = rayData.normal;
     float kMinus1_roughness = rayData.roughness;
 
-    // Compute ray origin for new rays spawned from the hit.
-    float3 rayOrigin = sd.computeRayOrigin();
+    // Create material instance.
+    let lod = ExplicitLodTextureSampler(0.f);
+    let mi = gScene.materials.getMaterialInstance(sd, lod);
 
     if (!rayData.shouldScatter) {
         // means we just hit x_k-1
         rayData.x_kMinus1_hitInfo = hit.pack();
     } else {
+        // Compute ray origin for new rays spawned from the hit.
+        float3 rayOrigin = sd.computeRayOrigin();
         // Generate scatter ray for the next path segment.
         // The raygen shader will continue the path based on the returned payload.
         if (!generateScatterRay(sd, mi, rayOrigin, rayData))
@@ -198,13 +216,17 @@ RandomReplayOutput tracePath(const uint2 pixel, const uint2 frameDim, RandomRepl
         sg.rng.state = replayParams.seed;
 
         ShadingData sd = loadShadingData(hit, primaryRayOrigin, primaryRayDir);
-        let lod = ExplicitLodTextureSampler(0.f);
-        let mi = gScene.materials.getMaterialInstance(sd, lod);
-        float3 rayOrigin = sd.computeRayOrigin();
 
         //Prepare payload
         ScatterRayData rayData = ScatterRayData(sg);
         rayData.pixel = pixel;
+        #if USE_SER
+        rayData.k = stopVertex;
+        #endif
+
+        let lod = ExplicitLodTextureSampler(0.f);
+        let mi = gScene.materials.getMaterialInstance(sd, lod);
+        float3 rayOrigin = sd.computeRayOrigin();
 
         // Calc primary ray footprint
         float3 x0_to_x1 = sd.posW - primaryRayOrigin;

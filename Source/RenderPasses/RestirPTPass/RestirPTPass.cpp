@@ -50,8 +50,8 @@ const char kCalcDuplicationPassShaderFile[] = "RenderPasses/RestirPTPass/CalcDup
 //CANDIDATE GENERATION SETTINGS
 // Ray tracing settings that affect the traversal stack size.
 // These should be set as small as possible.
-const uint32_t kMaxPayloadSizeBytes = 350u;
-const uint32_t kMaxRetracePayloadSize = 128u;
+const uint32_t kMaxPayloadSizeBytes = 196u;
+const uint32_t kMaxRetracePayloadSize = 100u;
 const uint32_t kMaxRecursionDepth = 2u;
 
 const std::string kInputVBuffer = "vbuffer";
@@ -320,14 +320,6 @@ void RestirPTPass::GenerateInitialCandidates(RenderContext* pRenderContext, cons
     var["gReplayInputBuffer"] = mpReplayInputBuffers[mReplayInputID]; // this will be written to in this pass, and read from in replay
     var["gPathViewerPathBuffer"] = mpPathDataBuffer;
 
-    uint elementCount = targetDim.x * targetDim.y;
-    if (!mpCandidateGenDebugBuffer || mpCandidateGenDebugBuffer->getElementCount() < elementCount)
-    {
-        mpCandidateGenDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
-        mpCandidateGenDebugBuffer->setName("Restir Candidate Debug Buffer");
-        var["debugBuffer"] = mpCandidateGenDebugBuffer;
-    }
-
     mpScene->bindShaderData(var["gScene"]); // binds the Scene parameter block (as seen in Scene.slang w all the vertex and geometry buffers
 
     mpPixelDebug->prepareProgram(mTracer.pProgram, var);
@@ -527,26 +519,6 @@ void RestirPTPass::PathReusePass(RenderContext* pRenderContext, const RenderData
         passVar["replayedDataBuffer"] = mpReplayOutputBuffer;
     }
 
-    uint elementCount = targetDim.x * targetDim.y;
-    if (isTemporal)
-    {
-        if (!mpTemporalDebugBuffer || mpTemporalDebugBuffer->getElementCount() < elementCount)
-        {
-            mpTemporalDebugBuffer = mpDevice->createStructuredBuffer(passVar["debugBuffer"], elementCount);
-            mpTemporalDebugBuffer->setName("Restir Debug Buffer - Temporal");
-        }
-        passVar["debugBuffer"] = mpTemporalDebugBuffer;
-    }
-    else
-    {
-        if (!mpSpatialDebugBuffer || mpSpatialDebugBuffer->getElementCount() < elementCount)
-        {
-            mpSpatialDebugBuffer = mpDevice->createStructuredBuffer(passVar["debugBuffer"], elementCount);
-            mpSpatialDebugBuffer->setName("Restir Debug Buffer - Spatial");
-        }
-        passVar["debugBuffer"] = mpSpatialDebugBuffer;
-    }
-
     // Samplers bind to root var because they are needed in ShiftMapping which we import
     if (mpEmissiveSampler)
     {
@@ -620,14 +592,6 @@ void RestirPTPass::PathViewerPass(RenderContext* pRenderContext, const RenderDat
     var["gOutputColor"] = renderData.getTexture(kOutputColor);
     var["gViewProjMatNoJitter"] = mpScene->getCamera()->getViewProjMatrixNoJitter();
 
-    uint32_t elementCount = targetDim.x * targetDim.y;
-    if (!mpPathViewerDebugBuffer || mpPathViewerDebugBuffer->getElementCount() < elementCount)
-    {
-        mpPathViewerDebugBuffer = mpDevice->createStructuredBuffer(var["debugBuffer"], elementCount);
-        mpPathViewerDebugBuffer->setName("Restir Path Viewer Debug Buffer");
-        var["debugBuffer"] = mpPathViewerDebugBuffer;
-    }
-
     mpPathViewerPass->execute(pRenderContext, targetDim.x, targetDim.y);
 
     if (alsoViewReplayPaths)
@@ -673,11 +637,13 @@ void RestirPTPass::renderUI(Gui::Widgets& widget)
     dirty |= widget.var("Max transmission bounces", mPathParams.maxTransmissionBounces, 0u, MAX_BOUNCES);
     widget.tooltip("Maximum number of transmission bounces.\n0 = no transmission\n1 = one transmission bounce etc.");
 
+    //faye: Commented out because we want these to be enabled like all the time.
+    /*
     dirty |= widget.checkbox("Evaluate direct illumination", mComputeDirect);
     widget.tooltip("Compute direct illumination.\nIf disabled only indirect is computed (when max bounces > 0).", true);
 
     dirty |= widget.checkbox("Use importance sampling", mUseImportanceSampling);
-    widget.tooltip("Use importance sampling for materials", true);
+    widget.tooltip("Use importance sampling for materials", true); */
 
     dirty |= widget.checkbox("Temporal reuse", mUseTemporalReuse);
     widget.tooltip("Use temporal reuse for ReSTIR", true);
@@ -699,13 +665,8 @@ void RestirPTPass::renderUI(Gui::Widgets& widget)
 
     // Debugging UI
 
-    if (widget.checkbox("Pause renderer and use path viewer", mUsePathViewer))
-    {
-        dirty = true;
-        dirty |= widget.var("Max vertices to store", mNumPathViewerVertices, 1u, 5u);
-        widget.tooltip("Number of vertices (starting x1) that path viewer will store. Capped at 5 currently.", true);
-    }
-    widget.tooltip("Whether we should pause the renderer and allow user to click a pixel to display its final path in space", true);
+    dirty |= widget.checkbox("Pause & use path viewer", mUsePathViewer);
+    widget.tooltip("Whether we should pause the renderer and allow user to click a pixel to display the path of its initial candidate in space. Note: keep camera stationary", true);
 
     dirty |= widget.checkbox("Visualize path info", mVisualizePathInfo);
     widget.tooltip("Whether information about the final path at each pixel is shown using debug colors", true);
@@ -726,7 +687,7 @@ bool RestirPTPass::onMouseEvent(const MouseEvent& mouseEvent)
 
     if (mouseEvent.type == MouseEvent::Type::ButtonDown)
     {
-        float2 mousePos = (mouseEvent.pos) * float2(1920, 1080);
+        float2 mousePos = (mouseEvent.pos) * float2(targetDim);
         mMousePixelPos = (uint2)mousePos;
         std::cout << mMousePixelPos.x << " " << mMousePixelPos.y << std::endl;
 
@@ -734,7 +695,7 @@ bool RestirPTPass::onMouseEvent(const MouseEvent& mouseEvent)
     }
     if (mUsePathViewer)
     {
-        return true; //don't want the camera to move, but i think this is broken TODO
+        return true; //don't want the camera to move, but i think this is broken since you can still move camera during path viewer...
     }
     
     return false;

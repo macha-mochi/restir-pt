@@ -3,6 +3,8 @@
 import Utils.Sampling.SampleGenerator;
 import PathState;
 
+#define C_CAP 20
+
 struct Sample {
     float3 p_hat; // aka f, the realized contribution of this sample (no pdfs multiplied yet)
     float w_i; // w_i = (resampling MIS weight m_i) * (target function evaluated for X_i) / (pdf of sampling X_i), where reciprocal of pdf of X_i is just W_Xi
@@ -71,7 +73,7 @@ struct Reservoir
     bool updateReservoir(Sample sample, float w_i_new, uint c_i, SampleGenerator sg) {
         w_sum += w_i_new;
         c += c_i;
-        c = min(c, 20); //setting a c cap of 20
+        c = min(c, C_CAP); //setting a c cap of 20
         if (w_i_new == 0) { // no chance to be chosen and no need to update W_X since w_sum doesn't change
             return false;
         }

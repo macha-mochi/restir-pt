@@ -91,10 +91,10 @@ private:
     const uint MAX_BOUNCES = 128;
     struct
     {
-        uint maxSurfaceBounces = 5;
-        uint maxDiffuseBounces = 3;
-        uint maxSpecularBounces = 3;
-        uint maxTransmissionBounces = 5;
+        uint maxSurfaceBounces = 9;
+        uint maxDiffuseBounces = 5;
+        uint maxSpecularBounces = 5;
+        uint maxTransmissionBounces = 9;
         float specularRoughnessThreshold = 0.2f;
     } mPathParams;
     /// Compute direct illumination (otherwise indirect only).
@@ -163,17 +163,11 @@ private:
     ref<Buffer> mpDuplicationScoreBuffer;
 
     //Debugging resources
-    ref<Buffer> mpCandidateGenDebugBuffer;
-    ref<Buffer> mpTemporalDebugBuffer;
-    ref<Buffer> mpSpatialDebugBuffer;
-
     bool mUsePathViewer = false; // if true, the renderer is paused so you can click around pixels on that frame
-    uint mNumPathViewerVertices = 5;
     uint2 mMousePixelPos;
     ref<Buffer> mpPathDataBuffer;
     ref<Buffer> mpReplayPathDataBuffer;
     ref<ComputePass> mpPathViewerPass;
-    ref<Buffer> mpPathViewerDebugBuffer;
 
     bool mVisualizePathInfo = false; //if true, paths continue generating the output color is just diff
     ref<ComputePass> mpVisualizePathsPass; /// Pass for visualizing path types (length, sample type, etc) with a color

@@ -7,14 +7,7 @@ import Scene.Raytracing;
 import PathState;
 import Utils.Debug.PixelDebug;
 
-struct DebugData
-{
-    float j1;
-
-    __init() {
-        j1 = 0.f;
-    }
-};
+#define C_CAP 20
 
 static const bool kUseDuplicationMap = USE_DUPLICATION_MAP;
 static const uint kShiftMappingType = SHIFT_MAPPING_TYPE;
@@ -45,9 +38,6 @@ struct TemporalReusePass {
     RWStructuredBuffer<Reservoir> outputBuffer;
     RWTexture2D<float4> outputColor;
 
-    // Debug
-    RWStructuredBuffer<DebugData> debugBuffer;
-
     // Finds the pixel position corresponding to the triangle hit by this frame's [pixel], last frame. Returning false if it would be out of bounds
     // intended usage: use [result] to sample a Texture2D holding data from LAST FRAME. ex: sampling last frame's vbuffer for where our CURRENT frame's pixel would have been in the last frame.
     bool calcLastFramePixelPos(uint2 pixel, out int2 result) {
@@ -67,7 +57,7 @@ struct TemporalReusePass {
     uint getModifiedCCap(uint2 pixelLastFrame){
         float d = duplicationScoreBuffer[ind(pixelLastFrame)];
 
-        return (uint)(20 + (1 - 20) * pow(d, 0.1)); //usising default c cap = 20, min c cap = 1, alpha = 0.1
+        return (uint)(C_CAP + (1 - C_CAP) * pow(d, 0.1)); //using default c cap = 20, min c cap = 1, alpha = 0.1
     }
 
     void execute(uint2 pixel) {
@@ -80,8 +70,6 @@ struct TemporalReusePass {
         // TODO: This is potentially expensive. We may want to store/restore the state from memory if it becomes a problem.
         for (uint i = 0; i < gPRNGDimension; i++)
             sampleNext1D(sg);
-
-        DebugData debugData = {};
 
         // Prep temporal domain data. TODO: this calculation will be the same for every pixel, potential optimization also calc it once and store in buffer?
         int2 pixelLastFrame = int2(0, 0);
@@ -185,7 +173,6 @@ struct TemporalReusePass {
             }
         }
         outputBuffer[ind(pixel)] = r;
-        debugBuffer[ind(pixel)] = debugData;
         replayedInputBuffer[ind(pixel)].k = r.X.k;
         replayedInputBuffer[ind(pixel)].seed = r.X.seed;
 

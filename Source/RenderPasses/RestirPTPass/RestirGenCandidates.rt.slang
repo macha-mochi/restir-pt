@@ -58,6 +58,8 @@ import RestirHelpers;
 import PathState;
 import Utils.Debug.PixelDebug;
 
+#define MAX_PATH_VIEWER_VERTICES 5 //this is hard coded in RestirTypes.slangh
+
 cbuffer CB
 {
     uint gFrameCount;    // Frame count since scene was loaded.
@@ -80,7 +82,6 @@ RWStructuredBuffer<RandomReplayInput> gReplayInputBuffer; // contains data that 
 RWTexture2D<float4> outputColor;
 
 //Debug buffers
-RWStructuredBuffer<DebugData> debugBuffer;
 RWStructuredBuffer<PathViewerPath> gPathViewerPathBuffer;
 
 // Static configuration based on defines set from the host.
@@ -109,14 +110,6 @@ struct ShadowRayData
 {
     bool visible;
 };
-
-struct DebugData {
-    uint2 pixel;
-
-    __init() {
-        pixel = uint2(0, 0);
-    }
-}
 
 /**
 ShiftContext is used for things that we capture early on in the path but then stay the same, it lives in tracePath but not ray payload.
@@ -200,8 +193,6 @@ struct ScatterRayData
 
     SampleGenerator sg;
     SampleGenerator sgScatterRays; ///< Per-ray state for the sample generator (up to 16B).
-
-    DebugData d;
 
     /**
      * Initializes ray payload with default parameters.
@@ -772,6 +763,8 @@ bool sampleNEE(const ShadingData sd, const IMaterialInstance mi, inout ScatterRa
  */
 Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 {
+    uint reached_depth = 0;
+
     uint bufferInd = pixel.y * frameDim.x + pixel.x;
     Reservoir r = {};
     PathViewerPath pathViewerPath = {};
@@ -809,7 +802,6 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
 
         // Prepare ray payload.
         ScatterRayData rayData = ScatterRayData(sg, sgScatterRays);
-        rayData.d.pixel = pixel;
 
         // Initialize data carriers and information needed for shift mappings
         Sample curBSDFSample = {};
@@ -856,6 +848,8 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         // Note: if we reached this point then we've already generated a valid ray starting from the first hit point in the scene.
         for (uint depth = 0; depth <= kMaxBounces && !rayData.path.isTerminated(); depth++)
         {
+            reached_depth = depth;
+
             // Process NEE samples with RIS
             if (depth != 0) { // since we alr updated reservoir with the first nee sample (light vertex = x2)
                 if (rayData.path.getVertexIndex() == shiftContext.rcVertexInd) {
@@ -906,9 +900,6 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                            
                         }
                     }
-
-                    pathViewerPath.numNonCameraVertices = depth + 1; // technucally, the last sample is has index depth + 1 + 1, but were not including it bc it might not be a point in space
-                    pathViewerPath.rcIndex = r.X.k;
                 }
             }
             // Clear sample data in preparation for next vertex's data
@@ -994,13 +985,12 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
                 if (!rayData.path.isTerminated()) {
                     r.X.path.setSampleType(PathFlags::bsdfSampled, PathFlags::sampledEmissive);
                 } //if we did hit the env map, path flags are alr set
-
-                pathViewerPath.numNonCameraVertices = depth + 1;
-                pathViewerPath.rcIndex = r.X.k;
             }
 
             if (!rayData.path.isTerminated()) {
-                pathViewerPath.vertices[depth + 1] = rayData.origin;
+                if(depth + 1 < MAX_PATH_VIEWER_VERTICES) {
+                    pathViewerPath.vertices[depth + 1] = rayData.origin;
+                }
             }
         }
         r.X.seed = sgScatterRaysState;
@@ -1008,18 +998,41 @@ Reservoir tracePath(const uint2 pixel, const uint2 frameDim)
         // Set info that might be needed by random replay later
         gReplayInputBuffer[bufferInd].k = r.X.k;
         gReplayInputBuffer[bufferInd].seed = sgScatterRaysState;
-
-        debugBuffer[bufferInd] = rayData.d;
     }
     else
     {
         // Background pixel. We don't hit anything in the scene so this is completely independent from NEE and you don't even need restir for this
         gDI_BGBuffer[bufferInd] = kUseEnvBackground ? gScene.envMap.eval(primaryRayDir) : kDefaultBackgroundColor; //this will be added onto a 0 reservoir value
-
-        debugBuffer[bufferInd] = {};
     }
 
+    pathViewerPath.numNonCameraVertices = min(r.X.path.getVertexIndex() - 1, MAX_PATH_VIEWER_VERTICES); // we dont include last point bc it might not be a point in space
+    pathViewerPath.rcIndex = r.X.k;
     gPathViewerPathBuffer[bufferInd] = pathViewerPath;
+
+    float4 color = float4(0, 0, 0, 1);
+    switch (reached_depth)
+    {
+    case 1:
+        color = float4(1, 0, 1, 1);
+        break;
+    case 2:
+        color = float4(1, 1, 1, 1);
+        break;
+    case 3:
+        color = float4(1, 1, 0, 1);
+        break;
+    case 4:
+        color = float4(0, 1, 0, 1);
+        break;
+    case 5:
+        color = float4(0, 0, 1, 1);
+        break;
+    default:
+        color = float4(0, 0, 0, 1);
+        break;
+    }
+
+    //outputColor[pixel] = color;
 
     return r;
 }
@@ -1133,7 +1146,7 @@ void rayGen()
 
 #if 1 //IS_LAST_PASS
 // we calculate the final color here
-    //outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
+    outputColor[pixel] = float4(r.X.p_hat * r.W_X + gDI_BGBuffer[pixelInd], 1);
     #endif
 }
 
