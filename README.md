@@ -7,6 +7,11 @@ I was initially interested in ReSTIR PT because of its real-time capabilities an
 My goals for this project are not only to understand and implement the algorithm but also to begin learning GPU programming through it. I enjoyed learning about CPU and GPU architectures in college classes and am very interested in how I as a programmer can enable graphics applications to utilize the GPU's power to the max and deliver the best visual quality. 
 
 <figure>
+  <img src="docs/images/faye/veach_ajar_restirpt.png" alt="ReSTIR PT on Veach Ajar scene.">
+  <figcaption>Restir PT on Veach Ajar.</figcaption>
+</figure>
+
+<figure>
   <img src="docs/images/faye/sponza_candles_restir.png" alt="ReSTIR PT on Sponza with 10k candles.">
   <figcaption>ReSTIR PT on Sponza with 10k candles.</figcaption>
 </figure>
