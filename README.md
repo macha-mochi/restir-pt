@@ -1,3 +1,28 @@
+# ReSTIR PT Implementation Using Falcor
+
+This repository extends NVIDIA's Falcor framework to implement the ReSTIR PT algorithm by Lin et. al. (2022), which is an algorithm for real time Monte Carlo pathtracing that is based on spatial and temporal reuse of path samples. This reuse enables the algorithm to deliver much better real time global illumination than traditional Monte Carlo pathtracing. It is able to reuse both direct and indirect light paths on a variety of materials (including specular and glossy ones) in an unbiased way, compared to previous ReSTIR variants like Bitterli et. al. (2020)'s ReSTIR DI and Ouyang et. al. (2021)'s ReSTIR GI.
+
+I was initially interested in ReSTIR PT because of its real-time capabilities and support for many material types. After writing a CPU Monte Carlo pathtracer, I wanted to improve on the long render times for visually interesting scenes containing metal and glass (or other dielectrics). I often had to wait overnight for scenes to render, and any adjustments meant having to re-render the whole thing! Thus ReSTIR PT was very compelling to me.
+
+My goals for this project are not only to understand and implement the algorithm but also to begin learning GPU programming through it. I enjoyed learning about CPU and GPU architectures in college classes and am very interested in how I as a programmer can enable graphics applications to utilize the GPU's power to the max and deliver the best visual quality. 
+
+<figure>
+  <img src="docs/images/faye/sponza_candles_restir.png" alt="ReSTIR PT on Sponza with 10k candles.">
+  <figcaption>ReSTIR PT on Sponza with 10k candles.</figcaption>
+</figure>
+
+<figure>
+  <img src="docs/images/faye/sponza_candles_naive.png" alt="Unidirectional PT on Sponza with 10k candles.">
+  <figcaption>Unidirectional PT on Sponza with 10k candles.</figcaption>
+</figure>
+
+<figure>
+  <img src="docs/images/faye/sponza_candles_reference.png" alt="Reference Sponza with 10k candles.">
+  <figcaption>Reference Sponza with 10k candles.</figcaption>
+</figure>
+
+Demo video: https://www.youtube.com/watch?v=y46Mv_lJe3Y (Disclaimer: this was recorded while I'm still in the process of implementing algorithmic / GPU optimizations)
+
 ![](docs/images/teaser.png)
 
 # Falcor
